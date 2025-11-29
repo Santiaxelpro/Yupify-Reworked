@@ -36,9 +36,9 @@ const Navigation = ({
         <NavButton icon={Music} label="Biblioteca" tab="library" />
       </nav>
 
-      {/* Navegación lateral (DESKTOP) */}
+      {/* Navegación lateral (DESKTOP) - Oculta en viewports pequeños */}
       <nav className="
-        hidden md:flex 
+        hidden lg:flex 
         fixed left-0 
         top-[72px]
         bottom-0 w-64 
