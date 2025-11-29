@@ -243,8 +243,8 @@ const App = () => {
       </div>
 
       {/* Contenido principal */}
-      <div className="flex-1 overflow-y-auto pb-32 md:pb-24 md:pl-64">
-        <div className="p-4">
+      <div className="flex-1 overflow-y-auto pb-32 md:pb-24 md:pl-72">
+        <div className="p-4 md:p-6">
           {activeTab === 'home' && (
             <div className="space-y-8">
               {searchResults.length > 0 ? (
