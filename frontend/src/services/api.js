@@ -1,6 +1,9 @@
 // src/services/api.js - Servicio de API para Yupify
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+// Usar rutas relativas que van a través del proxy en producción
+// En desarrollo: localhost:5173 -> localhost:3000 (vite proxy)
+// En producción: vercel.app -> vercel (mismo dominio)
+const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3000');
 
 // ==================== UTILIDADES ====================
 
