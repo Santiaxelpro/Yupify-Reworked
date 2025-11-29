@@ -129,9 +129,18 @@ const Player = ({
         crossOrigin="anonymous"
         onTimeUpdate={onTimeUpdate}
         onEnded={onEnded}
-        onError={(e) => console.error('Audio error:', e.target.error)}
-        onLoadStart={() => console.log('Audio: loadstart')}
-        onLoadedMetadata={() => console.log('Audio: loadedmetadata', audioRef.current?.duration)}
+        onError={(e) => {
+          const errors = {
+            1: 'MEDIA_ERR_ABORTED',
+            2: 'MEDIA_ERR_NETWORK',
+            3: 'MEDIA_ERR_DECODE',
+            4: 'MEDIA_ERR_SRC_NOT_SUPPORTED'
+          };
+          console.error('🎵 Audio error:', errors[e.target.error?.code] || 'Unknown', e.target.error?.message);
+        }}
+        onLoadStart={() => console.log('🎵 Audio: loadstart')}
+        onCanPlay={() => console.log('🎵 Audio: canplay')}
+        onLoadedMetadata={() => console.log('🎵 Audio: loadedmetadata, duration:', audioRef.current?.duration)}
       />
     </div>
   );

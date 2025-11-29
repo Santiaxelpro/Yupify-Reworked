@@ -30,18 +30,18 @@ export const useAudio = () => {
       console.log('📀 Loading track:', track.id, track.title);
 
       // Obtener stream real
-      const backendData = await api.track.getTrack(track.id, "LOSSLESS");
-      console.log('📡 Backend response:', backendData);
+      const trackData = await api.track.getTrack(track.id, "LOSSLESS");
+      console.log('📡 Track data:', trackData);
 
-      const realUrl = backendData[2]?.OriginalTrackUrl;
+      const realUrl = trackData?.url;
 
       if (!realUrl) {
-        console.error("❌ No se encontró OriginalTrackUrl en backend");
-        console.error('Response structure:', backendData.map((item, i) => `[${i}]: ${Object.keys(item).join(', ')}`));
+        console.error("❌ No se encontró URL en track data");
+        console.error('Track data structure:', trackData);
         return;
       }
 
-      console.log('🎵 Stream URL:', realUrl.substring(0, 50) + '...');
+      console.log('🎵 Stream URL:', realUrl.substring(0, 80) + '...');
       setStreamUrl(realUrl);
 
       // Cargar audio
