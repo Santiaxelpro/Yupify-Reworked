@@ -5,15 +5,15 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "destination": "https://yupify-reworked.onrender.com/api/$1"
+      "dest": "https://yupify-reworked.onrender.com/api/$1"
     },
     {
       "src": "/health",
-      "destination": "https://yupify-reworked.onrender.com/health"
+      "dest": "https://yupify-reworked.onrender.com/health"
     },
     {
       "src": "/(.*)",
-      "destination": "/index.html"
+      "dest": "/index.html"
     }
   ]
 }
