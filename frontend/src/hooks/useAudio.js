@@ -1,6 +1,6 @@
 // src/hooks/useAudio.js
 import { useState, useRef, useEffect } from 'react';
-import { trackService } from '../services/api';
+import api from '../services/api';
 
 export const useAudio = () => {
   const audioRef = useRef(null);
@@ -28,7 +28,7 @@ export const useAudio = () => {
       setCurrentTime(0);
 
       // Obtener stream real
-      const backendData = await trackService.getTrack(track.id, "LOSSLESS");
+      const backendData = await api.track.getTrack(track.id, "LOSSLESS");
 
       const realUrl = backendData[2]?.OriginalTrackUrl;
 
