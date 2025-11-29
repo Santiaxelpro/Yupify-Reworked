@@ -206,7 +206,7 @@ const App = () => {
   return (
     <div className="flex flex-col h-screen bg-black text-white overflow-hidden">
       {/* Header */}
-      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20">
+      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20 lg:pl-64">
         <div className="flex items-center gap-4 mb-4">
           <div className="flex items-center gap-2">
           <div className="bg-green-600 rounded-full p-2">
