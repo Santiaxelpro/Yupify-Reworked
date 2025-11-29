@@ -242,6 +242,7 @@ const App = () => {
         <div className="lg:pl-64">
           <SearchBar onSearch={handleSearch} loading={loading} />
         </div>
+      </div>
 
       {/* Contenido principal */}
       <div className="flex-1 overflow-y-auto pb-32 md:pb-24 lg:pl-64">
