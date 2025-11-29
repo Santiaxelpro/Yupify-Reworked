@@ -41,7 +41,7 @@ const Player = ({
     : currentTrack.cover;
 
   return (
-    <div className="fixed bottom-16 md:bottom-0 left-0 right-0 bg-gradient-to-t from-gray-950 via-gray-900 to-gray-900/95 backdrop-blur-xl border-t border-gray-800 shadow-2xl">
+    <div className="fixed bottom-16 md:bottom-0 left-0 right-0 bg-gray-950 border-t border-gray-800 shadow-2xl">
 
       {/* Info */}
       <div className="flex items-center gap-4 px-4 pt-3">
@@ -86,7 +86,7 @@ const Player = ({
       {/* Controles */}
       <div className="flex items-center justify-center gap-4 px-4 pb-4">
         <button onClick={onToggleShuffle}>
-          <Shuffle className={isShuffle ? "text-purple-400" : "text-gray-400"} />
+          <Shuffle className={isShuffle ? "text-green-600" : "text-gray-400"} />
         </button>
 
         <button onClick={onSkipPrevious}>
@@ -95,7 +95,7 @@ const Player = ({
 
         <button
           onClick={onTogglePlay}
-          className="bg-gradient-to-r from-purple-600 to-pink-600 rounded-full p-4"
+          className="bg-green-600 hover:bg-green-700 rounded-full p-4 transition-colors"
         >
           {isPlaying ? <Pause size={28} /> : <Play size={28} />}
         </button>
@@ -105,7 +105,7 @@ const Player = ({
         </button>
 
         <button onClick={onToggleRepeat}>
-          <Repeat className={isRepeat ? "text-purple-400" : "text-gray-400"} />
+          <Repeat className={isRepeat ? "text-green-600" : "text-gray-400"} />
         </button>
 
         <div className="flex items-center gap-2 ml-4">

@@ -31,8 +31,8 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, favorites = [], currentTr
           <div
             key={track.id || index}
             onClick={() => onPlay(track)}
-            className={`flex items-center gap-4 bg-gray-900 rounded-xl p-3 hover:bg-gray-800 cursor-pointer transition-all group ${
-              currentTrackId === track.id ? 'ring-2 ring-purple-500 bg-gray-800' : ''
+            className={`flex items-center gap-4 bg-gray-900 hover:bg-gray-800 rounded-xl p-3 cursor-pointer transition-all group ${
+              currentTrackId === track.id ? 'ring-2 ring-green-600 bg-gray-800' : ''
             }`}
           >
             <div className="relative w-16 h-16 flex-shrink-0">

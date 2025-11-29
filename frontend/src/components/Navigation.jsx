@@ -17,8 +17,8 @@ const Navigation = ({
       onClick={() => onTabChange(tab)}
       className={`flex flex-col md:flex-row items-center gap-1 md:gap-3 px-4 py-2 rounded-lg transition-all ${
         activeTab === tab
-          ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg'
-          : 'text-gray-400 hover:text-white hover:bg-gray-800'
+          ? 'bg-green-600 text-white'
+          : 'text-gray-400 hover:text-white hover:bg-gray-900'
       }`}
     >
       <Icon size={24} />
@@ -29,7 +29,7 @@ const Navigation = ({
   return (
     <>
       {/* Navegación inferior (MÓVIL) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-black/95 backdrop-blur-xl border-t border-gray-800 flex justify-around py-2 px-2 z-40">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-950 border-t border-gray-800 flex justify-around py-2 px-2 z-40">
         <NavButton icon={Home} label="Inicio" tab="home" />
         <NavButton icon={Search} label="Buscar" tab="search" />
         <NavButton icon={List} label="Cola" tab="queue" />
@@ -42,8 +42,7 @@ const Navigation = ({
         fixed left-0 
         top-[72px]
         bottom-0 w-64 
-        bg-gradient-to-b from-gray-950 to-black
-        backdrop-blur-xl 
+        bg-black
         border-r border-gray-800 
         flex-col p-4 gap-3
         z-30

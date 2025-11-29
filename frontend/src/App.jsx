@@ -204,15 +204,15 @@ const App = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gradient-to-b from-gray-950 via-gray-900 to-black text-white overflow-hidden">
+    <div className="flex flex-col h-screen bg-black text-white overflow-hidden">
       {/* Header */}
-      <div className="bg-gradient-to-r from-purple-900 via-pink-900 to-purple-900 p-4 shadow-2xl z-20">
+      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20">
         <div className="flex items-center gap-4 mb-4">
           <div className="flex items-center gap-2">
-            <div className="bg-gradient-to-br from-purple-600 to-pink-600 rounded-full p-2">
-              <Music size={28} />
-            </div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-white to-purple-200 bg-clip-text text-transparent">
+          <div className="bg-green-600 rounded-full p-2">
+            <Music size={28} />
+          </div>
+            <h1 className="text-3xl font-bold text-white">
               Yupify
             </h1>
           </div>
@@ -221,7 +221,7 @@ const App = () => {
           {!isAuthenticated ? (
             <button 
               onClick={() => setShowAuthModal(true)}
-              className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 rounded-full px-6 py-2 transition-all shadow-lg"
+              className="bg-green-600 hover:bg-green-700 rounded-full px-6 py-2 transition-all shadow-lg font-semibold"
             >
               Iniciar Sesión
             </button>
@@ -229,7 +229,7 @@ const App = () => {
             <div className="md:hidden">
               <button 
                 onClick={() => setShowUserMenu(!showUserMenu)}
-                className="w-10 h-10 rounded-full bg-gradient-to-r from-purple-600 to-pink-600 flex items-center justify-center"
+                className="w-10 h-10 rounded-full bg-green-600 flex items-center justify-center"
               >
                 <span className="text-white font-bold">
                   {user?.name?.charAt(0).toUpperCase()}

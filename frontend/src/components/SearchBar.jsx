@@ -29,13 +29,13 @@ const SearchBar = ({ onSearch, loading }) => {
           onKeyPress={handleKeyPress}
           placeholder="Buscar canciones, artistas, álbumes..."
           disabled={loading}
-          className="w-full bg-gray-900/50 backdrop-blur-sm rounded-full py-3 pl-12 pr-4 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 border border-gray-800 disabled:opacity-50"
+          className="w-full bg-gray-900 rounded-full py-3 pl-12 pr-4 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-600 border border-gray-800 disabled:opacity-50"
         />
       </div>
       <button
         onClick={handleSubmit}
         disabled={loading || !query.trim()}
-        className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 rounded-full px-8 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+        className="bg-green-600 hover:bg-green-700 rounded-full px-8 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
       >
         {loading ? 'Buscando...' : 'Buscar'}
       </button>

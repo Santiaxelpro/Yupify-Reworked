@@ -17,7 +17,7 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
   };
 
   return (
-    <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl p-4 hover:from-gray-800 hover:to-gray-700 cursor-pointer transition-all transform hover:scale-105 hover:shadow-xl group">
+    <div className="bg-gray-900 hover:bg-gray-800 rounded-xl p-4 cursor-pointer transition-all transform hover:scale-105 group">
       <div className="relative mb-3">
         <img
           src={getCover()}
@@ -27,7 +27,7 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
         />
         <button 
           onClick={(e) => { e.stopPropagation(); onPlay(track); }}
-          className="absolute bottom-2 right-2 bg-gradient-to-r from-purple-600 to-pink-600 rounded-full p-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0 shadow-lg"
+          className="absolute bottom-2 right-2 bg-green-600 hover:bg-green-700 rounded-full p-3 opacity-0 group-hover:opacity-100 transition-all transform translate-y-2 group-hover:translate-y-0 shadow-lg"
         >
           <Play size={20} fill="white" />
         </button>
@@ -46,7 +46,7 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
       <h3 className="font-semibold truncate text-white">{track.title}</h3>
       <p className="text-sm text-gray-400 truncate">{getArtist()}</p>
       <div className="flex items-center justify-between mt-2">
-        <span className="text-xs text-purple-400 font-semibold">
+        <span className="text-xs text-green-400 font-semibold">
           {track.audioQuality || track.quality || 'HI_RES'}
         </span>
         {track.plays && (

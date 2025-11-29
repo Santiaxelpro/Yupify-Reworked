@@ -31,7 +31,7 @@ const AuthModal = ({ isOpen, onClose, onLogin, onRegister, loading, error }) => 
 
   return (
     <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-8 max-w-md w-full shadow-2xl animate-in fade-in zoom-in">
+      <div className="bg-gray-900 rounded-2xl p-8 max-w-md w-full shadow-2xl animate-in fade-in zoom-in border border-gray-800">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-2xl font-bold">
             {mode === 'login' ? 'Iniciar Sesión' : 'Registrarse'}
@@ -99,7 +99,7 @@ const AuthModal = ({ isOpen, onClose, onLogin, onRegister, loading, error }) => 
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 rounded-lg px-4 py-3 font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            className="w-full bg-green-600 hover:bg-green-700 rounded-lg px-4 py-3 font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {loading && <Loader className="animate-spin" size={20} />}
             {loading ? 'Procesando...' : (mode === 'login' ? 'Iniciar Sesión' : 'Registrarse')}
@@ -110,7 +110,7 @@ const AuthModal = ({ isOpen, onClose, onLogin, onRegister, loading, error }) => 
           <button
             onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
             disabled={loading}
-            className="text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-50"
+            className="text-green-400 hover:text-green-300 transition-colors disabled:opacity-50"
           >
             {mode === 'login' 
               ? '¿No tienes cuenta? Regístrate' 
