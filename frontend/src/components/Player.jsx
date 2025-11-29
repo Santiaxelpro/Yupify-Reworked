@@ -126,10 +126,12 @@ const Player = ({
       {/* Audio real */}
       <audio
         ref={audioRef}
-        src={streamUrl || ""}
+        crossOrigin="anonymous"
         onTimeUpdate={onTimeUpdate}
         onEnded={onEnded}
-        onLoadedMetadata={() => isPlaying && audioRef.current.play()}
+        onError={(e) => console.error('Audio error:', e.target.error)}
+        onLoadStart={() => console.log('Audio: loadstart')}
+        onLoadedMetadata={() => console.log('Audio: loadedmetadata', audioRef.current?.duration)}
       />
     </div>
   );

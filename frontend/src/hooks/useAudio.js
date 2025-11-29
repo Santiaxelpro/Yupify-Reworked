@@ -27,30 +27,46 @@ export const useAudio = () => {
       setIsPlaying(false);
       setCurrentTime(0);
 
+      console.log('📀 Loading track:', track.id, track.title);
+
       // Obtener stream real
       const backendData = await api.track.getTrack(track.id, "LOSSLESS");
+      console.log('📡 Backend response:', backendData);
 
       const realUrl = backendData[2]?.OriginalTrackUrl;
 
       if (!realUrl) {
-        console.error("No se encontró OriginalTrackUrl en backend");
+        console.error("❌ No se encontró OriginalTrackUrl en backend");
+        console.error('Response structure:', backendData.map((item, i) => `[${i}]: ${Object.keys(item).join(', ')}`));
         return;
       }
 
+      console.log('🎵 Stream URL:', realUrl.substring(0, 50) + '...');
       setStreamUrl(realUrl);
 
       // Cargar audio
       if (audioRef.current) {
         audioRef.current.src = realUrl;
+        console.log('✅ Audio src set, loading...');
         await audioRef.current.load();
+        console.log('✅ Audio loaded, duration:', audioRef.current.duration);
       }
 
       // Reproducir
-      audioRef.current?.play().catch(console.error);
-      setIsPlaying(true);
+      const playPromise = audioRef.current?.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            console.log('▶️ Playing...');
+            setIsPlaying(true);
+          })
+          .catch(error => {
+            console.error('❌ Play error:', error);
+          });
+      }
 
     } catch (error) {
-      console.error("Error cargando track:", error);
+      console.error("❌ Error cargando track:", error);
     }
   };
 
