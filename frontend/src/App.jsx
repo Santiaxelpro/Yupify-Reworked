@@ -203,26 +203,6 @@ const App = () => {
     setShowUserMenu(false);
   };
 
-  // Mock de tracks para el home (mientras no haya contenido de la API)
-  const mockTracks = [
-    {
-      id: 1,
-      title: "Canción de Ejemplo 1",
-      artist: { name: "Artista 1" },
-      album: { cover: "https://via.placeholder.com/300" },
-      duration: 210,
-      quality: "HI_RES_LOSSLESS"
-    },
-    {
-      id: 2,
-      title: "Canción de Ejemplo 2",
-      artist: { name: "Artista 2" },
-      album: { cover: "https://via.placeholder.com/300" },
-      duration: 180,
-      quality: "HI_RES"
-    }
-  ];
-
   return (
     <div className="flex flex-col h-screen bg-gradient-to-b from-gray-950 via-gray-900 to-black text-white overflow-hidden">
       {/* Header */}
@@ -267,23 +247,30 @@ const App = () => {
         <div className="p-4">
           {activeTab === 'home' && (
             <div className="space-y-8">
-              <section>
-                <div className="flex items-center gap-2 mb-4">
-                  <TrendingUp className="text-purple-400" size={24} />
-                  <h2 className="text-2xl font-bold">Popular Ahora</h2>
+              {searchResults.length > 0 ? (
+                <section>
+                  <div className="flex items-center gap-2 mb-4">
+                    <TrendingUp className="text-purple-400" size={24} />
+                    <h2 className="text-2xl font-bold">Popular Ahora</h2>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                    {searchResults.slice(0, 10).map((track) => (
+                      <TrackCard
+                        key={track.id}
+                        track={track}
+                        onPlay={handlePlayTrack}
+                        onToggleFavorite={handleToggleFavorite}
+                        isFavorite={favorites.some(f => f.id === track.id)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <Music className="text-gray-600 mb-4" size={48} />
+                  <p className="text-gray-400 text-lg">Usa la búsqueda para descubrir música</p>
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                  {(searchResults.length > 0 ? searchResults : mockTracks).slice(0, 10).map((track) => (
-                    <TrackCard
-                      key={track.id}
-                      track={track}
-                      onPlay={handlePlayTrack}
-                      onToggleFavorite={handleToggleFavorite}
-                      isFavorite={favorites.some(f => f.id === track.id)}
-                    />
-                  ))}
-                </div>
-              </section>
+              )}
             </div>
           )}
 
