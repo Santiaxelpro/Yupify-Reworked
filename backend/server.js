@@ -4,7 +4,6 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
 require('dotenv').config();
 
 const app = express();
@@ -160,15 +159,12 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(409).json({ error: 'El usuario ya existe' });
     }
 
-    // Hash de la contraseña
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Crear usuario
+    // Crear usuario (sin hash por desarrollo)
     const userId = `user_${Date.now()}`;
     const user = {
       id: userId,
       email,
-      password: hashedPassword,
+      password, // Plain text for development
       name,
       createdAt: new Date().toISOString(),
       plan: 'free' // free, premium, family
@@ -216,9 +212,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
-    const validPassword = await bcrypt.compare(password, user.password);
-
-    if (!validPassword) {
+    if (password !== user.password) {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
