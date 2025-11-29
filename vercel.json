@@ -10,7 +10,11 @@
       "dest": "https://yupify-reworked.onrender.com/health"
     },
     {
-      "src": "/(.*)",
+      "src": "/assets/(.*)",
+      "dest": "/assets/$1"
+    },
+    {
+      "src": "/(?!api|health|assets)(.*)",
       "dest": "/index.html"
     }
   ]
