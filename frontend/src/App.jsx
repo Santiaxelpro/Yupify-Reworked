@@ -206,9 +206,9 @@ const App = () => {
   return (
     <div className="flex flex-col h-screen bg-black text-white overflow-hidden">
       {/* Header */}
-      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20 lg:pl-64">
+      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20">
         <div className="flex items-center gap-4 mb-4">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-shrink-0">
           <div className="bg-green-600 rounded-full p-2">
             <Music size={28} />
           </div>
@@ -221,12 +221,12 @@ const App = () => {
           {!isAuthenticated ? (
             <button 
               onClick={() => setShowAuthModal(true)}
-              className="bg-green-600 hover:bg-green-700 rounded-full px-6 py-2 transition-all shadow-lg font-semibold"
+              className="bg-green-600 hover:bg-green-700 rounded-full px-6 py-2 transition-all shadow-lg font-semibold flex-shrink-0"
             >
               Iniciar Sesión
             </button>
           ) : (
-            <div className="md:hidden">
+            <div className="md:hidden flex-shrink-0">
               <button 
                 onClick={() => setShowUserMenu(!showUserMenu)}
                 className="w-10 h-10 rounded-full bg-green-600 flex items-center justify-center"
@@ -239,8 +239,9 @@ const App = () => {
           )}
         </div>
         
-        <SearchBar onSearch={handleSearch} loading={loading} />
-      </div>
+        <div className="lg:pl-64">
+          <SearchBar onSearch={handleSearch} loading={loading} />
+        </div>
 
       {/* Contenido principal */}
       <div className="flex-1 overflow-y-auto pb-32 md:pb-24 lg:pl-64">
