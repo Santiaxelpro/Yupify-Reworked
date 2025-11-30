@@ -21,7 +21,6 @@
        "src": "/public/",
       "dest": "/sw.js"
     },
-
     {
       "src": "/(?!api|health|assets)(.*)",
       "dest": "/index.html"
