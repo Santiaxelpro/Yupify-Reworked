@@ -14,11 +14,11 @@
       "dest": "/assets/$1"
     },
     {
-       "src": "/favicon.ico",
-       "dest": "/favicon.ico"
+      "src": "/favicon.ico",
+      "dest": "/favicon.ico"
     },
     {
-       "src": "/public/",
+      "src": "/sw.js",
       "dest": "/sw.js"
     },
     {
