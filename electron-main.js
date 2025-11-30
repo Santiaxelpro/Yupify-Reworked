@@ -1,6 +1,8 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
-const isDev = require('electron-is-dev');
+
+// Detectar si estamos en modo desarrollo
+const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
 let mainWindow;
 
