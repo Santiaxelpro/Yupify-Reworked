@@ -245,12 +245,25 @@ app.post('/api/auth/login', async (req, res) => {
 // Búsqueda de tracks
 
 app.get('/api/song/:id', async (req, res) => {
-  const { id } = req.params;
-  const quality = req.query.quality || "LOSSLESS";
+  try {
+    const { id } = req.params;
+    const q = req.query.quality || "LOSSLESS";
 
-  // /song funciona como un alias extendido de track (cuando la instancia lo soporta)
-  await forward(req, res, `/song/?id=${id}&quality=${quality}`);
+    const api = await getRandomAPI();
+    const url = `${api}/song/?id=${id}&quality=${q}`;
+
+    console.log("→ Song v2:", url);
+
+    const response = await axios.get(url, { timeout: 15000 });
+
+    res.json(response.data); // manifest directo
+
+  } catch (err) {
+    console.error("Error /api/song:", err.message);
+    res.status(500).json({ error: "Error obteniendo canción" });
+  }
 });
+
 
 app.get('/api/search', async (req, res) => {
   try {
@@ -275,44 +288,41 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// ==================== TRACK MULTI-API (ROBUSTO) ====================
 app.get('/api/track/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const quality = req.query.quality || "LOSSLESS";
+    const q = req.query.quality || "LOSSLESS";
 
     const allAPIs = Object.values(HIFI_APIS).flat();
 
-    // Construir todas las URLs posibles
     const urls = allAPIs.map(api => {
-      const clean = api.replace(/\/+$/, "");
-      return `${clean}/track/?id=${id}&quality=${quality}`;
+      api = api.replace(/\/+$/, "");
+      return `${api}/track/?id=${id}&quality=${q}`;
     });
 
-    console.log("🌐 Probando APIs:", urls.length);
-
-    // Lanzar todas al mismo tiempo
     const requests = urls.map(url =>
       axios.get(url, { timeout: 6000 })
-        .then(r => ({ ok: true, url, data: r.data }))
-        .catch(err => ({ ok: false, url, error: err.message }))
+      .then(r => ({ ok: true, url, data: r.data }))
+      .catch(e => ({ ok: false, url, error: e.message }))
     );
 
     const results = await Promise.all(requests);
 
-    // Buscar la PRIMERA respuesta válida
-    const success = results.find(r => r.ok && Array.isArray(r.data) && r.data.length > 0);
+    const success = results.find(r =>
+      r.ok &&
+      r.data &&
+      typeof r.data === "object" &&
+      r.data.mimeType &&
+      Array.isArray(r.data.urls) &&
+      r.data.urls.length > 0
+    );
 
     if (!success) {
-      console.error("❌ Ninguna API devolvió datos válidos:", results);
-      return res.status(500).json({ 
-        error: "No se pudo obtener el track desde ninguna API",
-        details: results.map(r => ({ url: r.url, ok: r.ok, error: r.error }))
-      });
+      return res.status(500).json({ error: "No se pudo obtener el manifest" });
     }
 
-    console.log("✅ Track obtenido desde:", success.url);
-    return res.json(success.data);
+    console.log("Track OK desde:", success.url);
+    res.json(success.data);
 
   } catch (error) {
     console.error("Error en TRACK:", error.message);
