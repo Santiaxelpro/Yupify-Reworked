@@ -399,23 +399,39 @@ app.get('/api/playlist/:id', async (req, res) => {
   }
 });
 
-// Obtener letras
-app.get('/api/lyrics/:id', async (req, res) => {
+// ==================== LETRAS (LYRICSPLUS API) ====================
+app.get('/api/lyrics', async (req, res) => {
   try {
-    const { id } = req.params;
-    const api = await getRandomAPI();
+    const { title, artist, album, duration, source } = req.query;
 
+    if (!title || !artist) {
+      return res.status(400).json({
+        error: "Faltan parámetros obligatorios: title y artist"
+      });
+    }
 
-    const response = await axios.get(`${api}/lyrics/?id=${id}`, {
-      timeout: 10000
+    const params = new URLSearchParams({
+      title,
+      artist,
+      album: album || "",
+      duration: duration || "",
+      source: source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word"
     });
 
+    const url = `https://lyricsplus.prjktla.workers.dev/v2/lyrics/get?${params}`;
+
+    console.log("→ Lyrics API:", url);
+
+    const response = await axios.get(url, { timeout: 15000 });
+
     res.json(response.data);
+
   } catch (error) {
-    console.error('Error al obtener letras:', error.message);
-    res.status(500).json({ error: 'Error al obtener letras' });
+    console.error("Error en /api/lyrics:", error.message);
+    res.status(500).json({ error: "Error obteniendo letras" });
   }
 });
+
 
 // Obtener portada
 app.get('/api/cover', async (req, res) => {
