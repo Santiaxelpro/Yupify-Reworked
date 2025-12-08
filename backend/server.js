@@ -9,7 +9,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 // 🔥 Necesario para Render, Vercel, Cloudflare, Nginx, etc.
-app.set('trust proxy', true);
+app.set("trust proxy", 1);
 
 // Middleware
 app.use(helmet());
