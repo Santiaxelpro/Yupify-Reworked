@@ -400,6 +400,28 @@ export const cacheService = {
   }
 };
 
+// ==================== MANEJO UNIFICADO DE RESPUESTAS ====================
+
+async function handleResponse(response) {
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  // Normalizar estructura de Yupify API -> Frontend
+  const normalized = {
+    items: data?.data?.items ?? data?.items ?? [],
+    total: data?.data?.totalNumberOfItems ?? data?.total ?? 0,
+    limit: data?.data?.limit ?? data?.limit ?? 0,
+    offset: data?.data?.offset ?? data?.offset ?? 0,
+    raw: data
+  };
+
+  return normalized;
+}
+
+
 // ==================== EXPORTAR TODO ====================
 
 export default {
