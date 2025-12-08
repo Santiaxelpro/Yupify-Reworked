@@ -26,13 +26,7 @@ const getHeaders = (includeAuth = false) => {
   return headers;
 };
 
-const handleResponse = async (response) => {
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Error desconocido' }));
-    throw new Error(error.error || `HTTP ${response.status}`);
-  }
-  return response.json();
-};
+
 
 // ==================== AUTENTICACIÓN ====================
 
@@ -86,33 +80,40 @@ export const authService = {
 // ==================== BÚSQUEDA ====================
 
 export const searchService = {
-  // Buscar música
+  // Buscar música (query general)
   search: async (query, limit = 20) => {
-    const response = await fetch(
-      `${API_URL}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`,
-      { headers: getHeaders() }
-    );
-    return handleResponse(response);
+    const url = `${API_URL}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+
+    const response = await fetch(url, {
+      headers: getHeaders(),
+    });
+
+    return handleResponse(response); // <-- ahora devuelve items, total, offset, raw
   },
 
   // Buscar por artista
   searchArtist: async (artist, limit = 20) => {
-    const response = await fetch(
-      `${API_URL}/api/search?a=${encodeURIComponent(artist)}&limit=${limit}`,
-      { headers: getHeaders() }
-    );
+    const url = `${API_URL}/api/search?a=${encodeURIComponent(artist)}&limit=${limit}`;
+
+    const response = await fetch(url, {
+      headers: getHeaders(),
+    });
+
     return handleResponse(response);
   },
 
   // Buscar por álbum
   searchAlbum: async (album, limit = 20) => {
-    const response = await fetch(
-      `${API_URL}/api/search?al=${encodeURIComponent(album)}&limit=${limit}`,
-      { headers: getHeaders() }
-    );
+    const url = `${API_URL}/api/search?al=${encodeURIComponent(album)}&limit=${limit}`;
+
+    const response = await fetch(url, {
+      headers: getHeaders(),
+    });
+
     return handleResponse(response);
   }
 };
+
 
 // ==================== TRACKS ====================
 
