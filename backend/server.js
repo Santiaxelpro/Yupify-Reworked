@@ -291,23 +291,35 @@ app.get('/api/search', async (req, res) => {
 app.get('/api/track/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const q = req.query.quality || "LOSSLESS";
 
+    // Calidad solicitada
+    const qRaw = (req.query.quality || "LOSSLESS").toUpperCase().trim();
+
+    // Solo estas calidades
+    const VALID_QUALITIES = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"];
+
+    // Si no existe, usar LOSSLESS
+    const quality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
+
+    console.log(`\n>>> Calidad solicitada: ${qRaw} → calidad usada: ${quality}`);
+
+    // Rutas API
     const allAPIs = Object.values(HIFI_APIS).flat();
 
     const urls = allAPIs.map(api => {
       api = api.replace(/\/+$/, "");
-      return `${api}/track/?id=${id}&quality=${q}`;
+      return `${api}/track/?id=${id}&quality=${quality}`;
     });
 
     const requests = urls.map(url =>
       axios.get(url, { timeout: 6000 })
-      .then(r => ({ ok: true, url, data: r.data }))
-      .catch(e => ({ ok: false, url, error: e.message }))
+        .then(r => ({ ok: true, url, data: r.data }))
+        .catch(e => ({ ok: false, url, error: e.message }))
     );
 
     const results = await Promise.all(requests);
 
+    // Buscar una respuesta correcta
     const success = results.find(r =>
       r.ok &&
       r.data &&
@@ -318,42 +330,52 @@ app.get('/api/track/:id', async (req, res) => {
     );
 
     if (!success) {
-      return res.status(500).json({ error: "No se pudo obtener el manifest" });
+      return res.status(500).json({
+        error: "No se pudo obtener el manifest en la calidad solicitada",
+        requestedQuality: quality
+      });
     }
 
-    console.log("Track OK desde:", success.url);
-    res.json(success.data);
+    console.log(`✔️ Track OK desde: ${success.url} | Calidad: ${quality}`);
 
-  } catch (error) {
-    console.error("Error en TRACK:", error.message);
-    res.status(500).json({ error: "Error al obtener track" });
-  }
-});
-
-// Obtener manifest DASH
-app.get('/api/dash/:id', async (req, res) => {
-  try {
-    const api = await getRandomAPI();
-
-    const { id } = req.params;
-    const q = req.query.quality || "LOSSLESS";
-
-    const url = `${api}/dash/?id=${id}&quality=${q}`;
-
-    console.log("→ Proxy DASH:", url);
-
-    const response = await axios.get(url, {
-      timeout: 15000,
-      responseType: "text"
+    res.json({
+      ...success.data,
+      usedQuality: quality,
+      requestedQuality: quality
     });
 
-    res.set("Content-Type", "application/dash+xml");
-    res.send(response.data);
   } catch (error) {
-    console.error("Error DASH:", error.message);
-    res.status(500).json({ error: "Error obteniendo el manifest DASH" });
+    console.error("❌ Error en TRACK:", error.message);
+    res.status(500).json({ error: "Error interno al obtener track" });
   }
 });
+
+
+// Obtener manifest DASH (Ya no usado, ahora /api/song/:id)
+
+//app.get('/api/dash/:id', async (req, res) => {
+//  try {
+//    const api = await getRandomAPI();
+//
+//    const { id } = req.params;
+//    const q = req.query.quality || "LOSSLESS";
+//
+//    const url = `${api}/dash/?id=${id}&quality=${q}`;
+//
+//    console.log("→ Proxy DASH:", url);
+//
+//    const response = await axios.get(url, {
+//      timeout: 15000,
+//      responseType: "text"
+//    });
+//
+//    res.set("Content-Type", "application/dash+xml");
+//    res.send(response.data);
+//  } catch (error) {
+//    console.error("Error DASH:", error.message);
+//    res.status(500).json({ error: "Error obteniendo el manifest DASH" });
+//  }
+// });
 
 // Obtener álbum
 app.get('/api/album/:id', async (req, res) => {
