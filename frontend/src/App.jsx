@@ -380,30 +380,34 @@ const App = () => {
         onLogout={handleLogout}
       />
 
-      {/* Player */}
-      <Player
-        currentTrack={currentTrack}
-        isPlaying={isPlaying}
-        currentTime={currentTime}
-        duration={duration}
-        volume={volume}
-        isMuted={isMuted}
-        isRepeat={isRepeat}
-        isShuffle={isShuffle}
-        isFavorite={favorites.some(f => f.id === currentTrack?.id)}
-        onTogglePlay={togglePlay}
-        onSkipNext={handleSkipNext}
-        onSkipPrevious={handleSkipPrevious}
-        onSeek={handleSeek}
-        onVolumeChange={handleVolumeChange}
-        onToggleMute={toggleMute}
-        onToggleFavorite={() => currentTrack && handleToggleFavorite(currentTrack)}
-        onToggleRepeat={() => setIsRepeat(!isRepeat)}
-        onToggleShuffle={() => setIsShuffle(!isShuffle)}
-        audioRef={audioRef}
-        onTimeUpdate={handleTimeUpdate}
-        onEnded={handleEnded}
-      />
+<Player
+  currentTrack={currentTrack}
+  streamUrl={streamUrl}
+  isPlaying={isPlaying}
+  currentTime={currentTime}
+  duration={duration}
+  volume={volume}
+  isMuted={isMuted}
+  isRepeat={isRepeat}
+  isShuffle={isShuffle}
+
+  onTogglePlay={togglePlay}
+  onSkipNext={skipNext}
+  onSkipPrevious={skipPrevious}
+  onSeek={handleSeek}
+  onVolumeChange={handleVolumeChange}
+  onToggleMute={toggleMute}
+  onToggleFavorite={toggleFavorite}
+  onToggleRepeat={() => setIsRepeat(!isRepeat)}
+  onToggleShuffle={() => setIsShuffle(!isShuffle)}
+  onTimeUpdate={handleTimeUpdate}
+  onEnded={handleEnded}
+  audioRef={audioRef}
+
+  // 🔥 NUEVO
+  quality={quality}
+  onChangeQuality={setQuality}
+/>
 
       {/* Auth Modal */}
       <AuthModal
