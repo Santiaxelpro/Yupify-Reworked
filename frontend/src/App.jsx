@@ -392,19 +392,19 @@ const App = () => {
   isShuffle={isShuffle}
 
   onTogglePlay={togglePlay}
-  onSkipNext={skipNext}
-  onSkipPrevious={skipPrevious}
+  onSkipNext={handleSkipNext}
+  onSkipPrevious={handleSkipPrevious}
   onSeek={handleSeek}
   onVolumeChange={handleVolumeChange}
   onToggleMute={toggleMute}
-  onToggleFavorite={toggleFavorite}
+  onToggleFavorite={handleToggleFavorite}
   onToggleRepeat={() => setIsRepeat(!isRepeat)}
   onToggleShuffle={() => setIsShuffle(!isShuffle)}
   onTimeUpdate={handleTimeUpdate}
   onEnded={handleEnded}
   audioRef={audioRef}
 
-  // 🔥 NUEVO
+  // Control de calidad
   quality={quality}
   onChangeQuality={setQuality}
 />
