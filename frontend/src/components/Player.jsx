@@ -106,6 +106,26 @@ const Player = ({
         </div>
       )}
 
+    {/* Selector de calidad */}
+<div className="mt-3 px-4">
+  <label className="text-gray-400 text-xs font-semibold px-1">
+    Calidad de audio
+  </label>
+  <select
+    className="mt-1 w-full bg-gray-900 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 outline-none focus:border-green-500 transition"
+    value={quality}
+    onChange={(e) => {
+      const q = e.target.value;
+      onChangeQuality(q);
+      localStorage.setItem("audioQuality", q);
+    }}
+  >
+    <option value="LOSSLESS">LOSSLESS</option>
+    <option value="HIGH">HIGH</option>
+    <option value="MEDIUM">MEDIUM</option>
+    <option value="LOW">LOW</option>
+  </select>
+</div>
       {/* 🎧 PLAYER */}
       <div className="fixed bottom-16 md:bottom-0 left-0 right-0 bg-gray-950 border-t border-gray-800 shadow-2xl lg:pl-64">
 
