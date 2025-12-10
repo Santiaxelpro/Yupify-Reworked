@@ -19,6 +19,12 @@ export const useAudio = () => {
   const [isShuffle, setIsShuffle] = useState(false);
 
   // ============================
+  // 🔥 NUEVO: Calidad de audio global
+  // ============================
+  const [quality, setQuality] = useState("LOSSLESS");
+
+
+  // ============================
   // 🔥 Cargar track + URL de audio real
   // ============================
   const playTrack = async (track) => {
@@ -27,41 +33,40 @@ export const useAudio = () => {
       setIsPlaying(false);
       setCurrentTime(0);
 
-      console.log('📀 Loading track:', track.id, track.title);
+      console.log("📀 Loading track:", track.id, track.title);
+      console.log("🎚 Using quality:", quality);
 
-      // Obtener stream real
-      const trackData = await api.track.getTrack(track.id, "LOSSLESS");
-      console.log('📡 Track data:', trackData);
+      // Obtener stream real con calidad seleccionada
+      const trackData = await api.track.getTrack(track.id, quality);
+      console.log("📡 Track data:", trackData);
 
       const realUrl = trackData?.url;
 
       if (!realUrl) {
         console.error("❌ No se encontró URL en track data");
-        console.error('Track data structure:', trackData);
+        console.error("Track data structure:", trackData);
         return;
       }
 
-      console.log('🎵 Stream URL:', realUrl.substring(0, 80) + '...');
+      console.log("🎵 Stream URL:", realUrl.substring(0, 80) + "...");
       setStreamUrl(realUrl);
 
-      // Cargar audio
       if (audioRef.current) {
         audioRef.current.src = realUrl;
-        console.log('✅ Audio src set, loading...');
+        console.log("✅ Audio src set, loading...");
         await audioRef.current.load();
-        console.log('✅ Audio loaded, duration:', audioRef.current.duration);
+        console.log("✅ Audio loaded, duration:", audioRef.current.duration);
       }
 
-      // Reproducir
       const playPromise = audioRef.current?.play();
       if (playPromise !== undefined) {
         playPromise
           .then(() => {
-            console.log('▶️ Playing...');
+            console.log("▶️ Playing...");
             setIsPlaying(true);
           })
           .catch(error => {
-            console.error('❌ Play error:', error);
+            console.error("❌ Play error:", error);
           });
       }
 
@@ -69,6 +74,7 @@ export const useAudio = () => {
       console.error("❌ Error cargando track:", error);
     }
   };
+
 
   // ============================
   // 🔥 Actualizar volumen
@@ -78,6 +84,7 @@ export const useAudio = () => {
       audioRef.current.volume = isMuted ? 0 : volume;
     }
   }, [volume, isMuted]);
+
 
   // ============================
   // 🔥 Play/Pause
@@ -94,6 +101,7 @@ export const useAudio = () => {
     }
   };
 
+
   // ============================
   // 🔥 Actualizar tiempo
   // ============================
@@ -102,6 +110,7 @@ export const useAudio = () => {
     setCurrentTime(audioRef.current.currentTime);
     setDuration(audioRef.current.duration || 0);
   };
+
 
   // ============================
   // 🔥 Seek
@@ -113,6 +122,7 @@ export const useAudio = () => {
     setCurrentTime(newTime);
   };
 
+
   // ============================
   // 🔥 Volumen
   // ============================
@@ -123,6 +133,7 @@ export const useAudio = () => {
   };
 
   const toggleMute = () => setIsMuted(!isMuted);
+
 
   // ============================
   // 🔥 Canción terminada
@@ -136,6 +147,8 @@ export const useAudio = () => {
     setIsPlaying(false);
   };
 
+
+
   return {
     // Estado
     isPlaying,
@@ -148,7 +161,7 @@ export const useAudio = () => {
     isMuted,
     isRepeat,
     isShuffle,
-
+    quality,        // ⬅ NUEVO
     audioRef,
 
     // Funciones
@@ -161,7 +174,8 @@ export const useAudio = () => {
     handleEnded,
 
     setIsRepeat,
-    setIsShuffle
+    setIsShuffle,
+    setQuality       // ⬅ NUEVO
   };
 };
 
