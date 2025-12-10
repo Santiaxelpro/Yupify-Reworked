@@ -244,25 +244,25 @@ app.post('/api/auth/login', async (req, res) => {
 
 // Búsqueda de tracks
 
-app.get('/api/song/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const q = req.query.quality || "LOSSLESS";
-
-    const api = await getRandomAPI();
-    const url = `${api}/song/?id=${id}&quality=${q}`;
-
-    console.log("→ Song v2:", url);
-
-    const response = await axios.get(url, { timeout: 15000 });
-
-    res.json(response.data); // manifest directo
-
-  } catch (err) {
-    console.error("Error /api/song:", err.message);
-    res.status(500).json({ error: "Error obteniendo canción" });
-  }
-});
+// app.get('/api/song/:id', async (req, res) => {
+//  try {
+//    const { id } = req.params;
+//    const q = req.query.quality || "LOSSLESS";
+//
+//    const api = await getRandomAPI();
+//    const url = `${api}/song/?id=${id}&quality=${q}`;
+//
+//   console.log("→ Song v2:", url);
+//
+//    const response = await axios.get(url, { timeout: 15000 });
+//
+//    res.json(response.data); // manifest directo
+//
+//  } catch (err) {
+//    console.error("Error /api/song:", err.message);
+//    res.status(500).json({ error: "Error obteniendo canción" });
+//  }
+// });
 
 
 app.get('/api/search', async (req, res) => {
@@ -331,8 +331,8 @@ app.get('/api/track/:id', async (req, res) => {
 
     if (!success) {
       return res.status(500).json({
-        error: "No se pudo obtener el manifest en la calidad solicitada",
-        requestedQuality: quality
+        error: "No se pudo obtener el track en la calidad solicitada",
+        requestedQuality: qRaw
       });
     }
 
@@ -341,7 +341,7 @@ app.get('/api/track/:id', async (req, res) => {
     res.json({
       ...success.data,
       usedQuality: quality,
-      requestedQuality: quality
+      requestedQuality: qRaw
     });
 
   } catch (error) {
@@ -349,6 +349,7 @@ app.get('/api/track/:id', async (req, res) => {
     res.status(500).json({ error: "Error interno al obtener track" });
   }
 });
+
 
 
 // Obtener manifest DASH (Ya no usado, ahora /api/song/:id)
