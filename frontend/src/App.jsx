@@ -382,7 +382,7 @@ const App = () => {
 
 <Player
   currentTrack={currentTrack}
-  streamUrl={streamUrl}
+  streamUrl={currentTrack?.streamUrl || ""}
   isPlaying={isPlaying}
   currentTime={currentTime}
   duration={duration}
