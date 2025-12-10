@@ -57,6 +57,7 @@ const App = () => {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [quality, setQuality] = useState('LOSSLESS'); // ⬅ NUEVO
 
   // Cargar datos al iniciar
   useEffect(() => {
