@@ -14,31 +14,30 @@ import {
 } from "lucide-react";
 
 const Player = ({
-  currentTrack,
-  streamUrl,
-  isPlaying,
-  currentTime,
-  duration,
-  volume,
-  isMuted,
-  isRepeat,
-  isShuffle,
-  isFavorite,
+  currentTrack = null,
+  streamUrl = "",
+  isPlaying = false,
+  currentTime = 0,
+  duration = 0,
+  volume = 1,
+  isMuted = false,
+  isRepeat = false,
+  isShuffle = false,
+  isFavorite = false,
 
-  onTogglePlay,
-  onSkipNext,
-  onSkipPrevious,
-  onSeek,
-  onVolumeChange,
-  onToggleMute,
-  onToggleFavorite,
-  onToggleRepeat,
-  onToggleShuffle,
-  audioRef,
-  onTimeUpdate,
-  onEnded
+  onTogglePlay = () => {},
+  onSkipNext = () => {},
+  onSkipPrevious = () => {},
+  onSeek = () => {},
+  onVolumeChange = () => {},
+  onToggleMute = () => {},
+  onToggleFavorite = () => {},
+  onToggleRepeat = () => {},
+  onToggleShuffle = () => {},
+  audioRef = null,
+  onTimeUpdate = () => {},
+  onEnded = () => {}
 }) => {
-
   // ----------------------
   // 🔥 LYRICS MODAL
   // ----------------------
@@ -53,23 +52,17 @@ const Player = ({
 
     try {
       const res = await fetch(
-        `/api/lyrics?track=${encodeURIComponent(currentTrack.title)}&artist=${encodeURIComponent(currentTrack.artist?.name)}`
+        `/api/lyrics?track=${encodeURIComponent(currentTrack.title)}&artist=${encodeURIComponent(currentTrack.artist?.name || "")}`
       );
-
       const data = await res.json();
 
-      if (!data || !data.lyrics) {
-        setLyricsContent("No se encontraron letras.");
-      } else {
-        setLyricsContent(data.lyrics);
-      }
+      setLyricsContent(data?.lyrics || "No se encontraron letras.");
     } catch (err) {
       setLyricsContent("Error al obtener letras.");
     }
   };
 
   // ----------------------
-
   const formatTime = (s) => {
     if (!s || isNaN(s)) return "0:00";
     const m = Math.floor(s / 60);
@@ -79,10 +72,9 @@ const Player = ({
 
   if (!currentTrack) return null;
 
-  // 🔥 Corrección cover de Tidal
   const tidalCover = currentTrack.album?.cover
     ? `https://resources.tidal.com/images/${currentTrack.album.cover.replace(/-/g, "/")}/1280x1280.jpg`
-    : currentTrack.cover;
+    : currentTrack.cover || "";
 
   return (
     <>
@@ -123,13 +115,13 @@ const Player = ({
             src={tidalCover}
             alt={currentTrack.title}
             className="w-16 h-16 rounded-lg shadow-lg"
-            onError={(e) => (e.target.src = currentTrack.cover)}
+            onError={(e) => (e.target.src = currentTrack.cover || "")}
           />
 
           <div className="flex-1 min-w-0">
             <h3 className="font-semibold truncate">{currentTrack.title}</h3>
             <p className="text-sm text-gray-400 truncate">
-              {currentTrack.artist?.name}
+              {currentTrack.artist?.name || "Desconocido"}
             </p>
             <span className="text-xs text-purple-400">LOSSLESS</span>
           </div>
@@ -209,13 +201,15 @@ const Player = ({
         </div>
 
         {/* 🎵 Audio real */}
-        <audio
-          ref={audioRef}
-          src={streamUrl}
-          crossOrigin="anonymous"
-          onTimeUpdate={onTimeUpdate}
-          onEnded={onEnded}
-        />
+        {streamUrl && (
+          <audio
+            ref={audioRef}
+            src={streamUrl}
+            crossOrigin="anonymous"
+            onTimeUpdate={onTimeUpdate}
+            onEnded={onEnded}
+          />
+        )}
       </div>
     </>
   );
