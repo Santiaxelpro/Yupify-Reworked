@@ -303,45 +303,43 @@ app.get('/api/track/:id', async (req, res) => {
 
     console.log(`\n>>> Calidad solicitada: ${qRaw} → calidad usada: ${quality}`);
 
-    // Rutas API
+    // Todas las APIs
     const allAPIs = Object.values(HIFI_APIS).flat();
 
-    const urls = allAPIs.map(api => {
+    // Crear requests
+    const requests = allAPIs.map(api => {
       api = api.replace(/\/+$/, "");
-      return `${api}/track/?id=${id}&quality=${quality}`;
-    });
-
-    const requests = urls.map(url =>
-      axios.get(url, { timeout: 6000 })
+      const url = `${api}/track/?id=${id}&quality=${quality}`;
+      return axios.get(url, { timeout: 6000 })
         .then(r => ({ ok: true, url, data: r.data }))
-        .catch(e => ({ ok: false, url, error: e.message }))
-    );
+        .catch(e => ({ ok: false, url, error: e.message }));
+    });
 
     const results = await Promise.all(requests);
 
-    // Buscar una respuesta correcta
+    // Buscar respuesta válida
     const success = results.find(r =>
       r.ok &&
       r.data &&
-      typeof r.data === "object" &&
-      r.data.mimeType &&
-      Array.isArray(r.data.urls) &&
-      r.data.urls.length > 0
+      r.data.data &&
+      r.data.data.manifestMimeType &&
+      r.data.data.manifest
     );
 
     if (!success) {
       return res.status(500).json({
         error: "No se pudo obtener el track en la calidad solicitada",
-        requestedQuality: qRaw
+        requestedQuality: quality
       });
     }
 
     console.log(`✔️ Track OK desde: ${success.url} | Calidad: ${quality}`);
 
+    // Devolver la data real
     res.json({
-      ...success.data,
+      ...success.data.data,
       usedQuality: quality,
-      requestedQuality: qRaw
+      requestedQuality: quality
     });
 
   } catch (error) {
