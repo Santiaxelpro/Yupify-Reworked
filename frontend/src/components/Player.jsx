@@ -36,7 +36,11 @@ const Player = ({
   onToggleShuffle = () => {},
   audioRef = null,
   onTimeUpdate = () => {},
-  onEnded = () => {}
+  onEnded = () => {},
+
+  // 🔥 AGREGAR ESTO
+  quality = "LOSSLESS",
+  onChangeQuality = () => {}
 }) => {
   // ----------------------
   // 🔥 LYRICS MODAL
