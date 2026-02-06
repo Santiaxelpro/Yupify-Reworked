@@ -1,25 +1,17 @@
 {
   "version": 2,
   "routes": [
+    { "handle": "filesystem" },
     {
       "src": "/api/(.*)",
       "dest": "https://yupify-reworked.onrender.com/api/$1"
     },
-    {
-      "src": "/health",
-      "dest": "https://yupify-reworked.onrender.com/health"
-    },
-    {
-      "src": "/assets/(.*)",
-      "dest": "/assets/$1"
-    },
+    { "src": "/health", "dest": "https://yupify-reworked.onrender.com/health" },
+    { "src": "/assets/(.*)", "dest": "/assets/$1" },
     {
       "src": "/(.*)\\.(js|css|png|jpg|jpeg|svg|ico|map|woff2?)",
       "dest": "/$1"
     },
-    {
-      "src": "/(.*)",
-      "dest": "/index.html"
-    }
+    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }
