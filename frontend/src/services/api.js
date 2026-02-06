@@ -3,7 +3,7 @@
 // Base URL de la API
 // En desarrollo por defecto apunta al backend local en http://localhost:3000
 // Puedes sobrescribir con VITE_API_URL en .env
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const API_URL = import.meta.env.VITE_API_URL || 'https://yupify-reworked.onrender.com';
 
 // ==================== UTILIDADES ====================
 
