@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "https://yupify-reworked.onrender.com/api/$1"
+    },
+    {
+      "src": "/health",
+      "dest": "https://yupify-reworked.onrender.com/health"
+    },
+    {
+      "src": "/assets/(.*)",
+      "dest": "/assets/$1"
+    },
+    {
+      "src": "/favicon.ico",
+      "dest": "/favicon.ico"
+    },
+    {
+      "src": "/sw.js",
+      "dest": "/sw.js"
+    },
+    {
+      "src": "/(?!api|health|assets)(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}
