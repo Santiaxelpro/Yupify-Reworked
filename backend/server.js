@@ -14,7 +14,20 @@ app.set("trust proxy", 1);
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      'http://localhost:5173',
+      'https://yupify-reworked.vercel.app',
+      'https://yupify-reworked.onrender.com'
+    ];
+    
+    // Permitir si está en la lista, si no tiene origin (server-to-server), o si es wildcard
+    if (!origin || allowedOrigins.includes(origin) || process.env.CORS_ORIGIN === '*' || process.env.CORS_ORIGIN === origin) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 app.use(express.json());
