@@ -15,7 +15,11 @@ app.set("trust proxy", 1);
 const TRENDING_TTL_MS = 15 * 60 * 1000;
 const TRENDING_TARGET = 600;
 const TRENDING_BATCH = 8;
-const TRENDING_COUNTRIES = ['us', 'gb', 'br', 'mx', 'es', 'ar', 'fr', 'de', 'it', 'jp', 'kr', 'ca', 'au'];
+// LatAm + hispanohablantes (incluye EspaÃ±a)
+const TRENDING_COUNTRIES = [
+  'ar', 'bo', 'br', 'cl', 'co', 'cr', 'cu', 'do', 'ec', 'es', 'gt', 'hn',
+  'mx', 'ni', 'pa', 'pe', 'pr', 'py', 'sv', 'uy', 've'
+];
 let trendingState = { ts: 0, seeds: [], seedCursor: 0, items: [], seenIds: new Set() };
 
 // Middleware
