@@ -1,14 +1,12 @@
 // src/components/TrackCard.jsx
 import React from 'react';
 import { Play, Heart, MoreVertical } from 'lucide-react';
-import { getArtistName } from '../utils/helpers';
+import { getArtistName, getCoverUrl } from '../utils/helpers';
 
 const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
   
   const getCover = () => {
-    if (track.cover) return track.cover;
-    if (track.album?.cover) return track.album.cover;
-    return 'https://resources.tidal.com/images/5187b614/1c44/4694/9ab1/d675a3c41114/1280x1280.jpg';
+    return getCoverUrl(track, 1280) || track.cover || track.album?.cover || 'https://resources.tidal.com/images/5187b614/1c44/4694/9ab1/d675a3c41114/1280x1280.jpg';
   };
 
   return (

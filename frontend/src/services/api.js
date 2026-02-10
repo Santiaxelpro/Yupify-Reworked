@@ -5,7 +5,7 @@
 // Puedes sobrescribir con VITE_API_URL en .env
 const API_URL = import.meta.env.VITE_API_URL || (
   import.meta.env.DEV 
-    ? 'https://yupify-reworked.onrender.com' // En local (npm run dev)
+    ? 'http://localhost:3000' // En local (npm run dev)
     : 'https://yupify-reworked.vercel.app'   // En producción (Vercel) usa la máscara
 );
 
@@ -206,6 +206,15 @@ export const exploreService = {
   getHome: async (country = 'US') => {
     const response = await fetch(
       `${API_URL}/api/home?country=${country}`,
+      { headers: getHeaders() }
+    );
+    return handleResponse(response);
+  },
+
+  // Obtener trending
+  getTrending: async (limit = 20, offset = 0) => {
+    const response = await fetch(
+      `${API_URL}/api/trending?limit=${limit}&offset=${offset}`,
       { headers: getHeaders() }
     );
     return handleResponse(response);

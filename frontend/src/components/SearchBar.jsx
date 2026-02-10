@@ -12,34 +12,27 @@ const SearchBar = ({ onSearch, loading }) => {
     }
   };
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter') {
-      handleSubmit(e);
-    }
-  };
-
   return (
-    <div className="flex gap-2">
+    <form onSubmit={handleSubmit} className="flex gap-3 items-center w-full">
       <div className="flex-1 relative">
-        <Search className="absolute left-3 top-3 text-gray-400" size={20} />
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyPress={handleKeyPress}
           placeholder="Buscar canciones, artistas, álbumes..."
           disabled={loading}
-          className="w-full bg-gray-900 rounded-full py-3 pl-12 pr-4 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-600 border border-gray-800 disabled:opacity-50"
+          className="w-full h-12 bg-gray-900 rounded-full pl-12 pr-4 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-600 border border-gray-800 disabled:opacity-50"
         />
       </div>
       <button
-        onClick={handleSubmit}
+        type="submit"
         disabled={loading || !query.trim()}
-        className="bg-green-600 hover:bg-green-700 rounded-full px-8 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
+        className="h-12 bg-green-600 hover:bg-green-700 rounded-full px-8 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
       >
         {loading ? 'Buscando...' : 'Buscar'}
       </button>
-    </div>
+    </form>
   );
 };
 

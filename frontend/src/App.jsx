@@ -60,6 +60,9 @@ const App = () => {
   const lyricsInFlightRef = useRef(new Set());
   const [lyricsCache, setLyricsCache] = useState({});
   const [favorites, setFavorites] = useState([]);
+  const [trendingTracks, setTrendingTracks] = useState([]);
+  const [trendingLoading, setTrendingLoading] = useState(false);
+  const [trendingHasMore, setTrendingHasMore] = useState(true);
   const [myPlaylists, setMyPlaylists] = useState([]);
   const [history, setHistory] = useState([]);
   const [homeContent, setHomeContent] = useState(null);
@@ -69,10 +72,15 @@ const App = () => {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const contentRef = useRef(null);
+  const trendingOffsetRef = useRef(0);
+  const trendingLoadingRef = useRef(false);
+  const trendingHasMoreRef = useRef(true);
 
   // Cargar datos al iniciar
   useEffect(() => {
     loadHomeContent();
+    loadTrending(true);
     if (isAuthenticated) {
       loadUserData();
     }
@@ -87,6 +95,67 @@ const App = () => {
       console.error('Error cargando home:', err);
     }
   };
+
+  const TRENDING_LIMIT = 20;
+  const loadTrending = async (reset = false) => {
+    if (trendingLoadingRef.current) return;
+    if (!reset && !trendingHasMoreRef.current) return;
+
+    trendingLoadingRef.current = true;
+    setTrendingLoading(true);
+    if (reset) {
+      trendingOffsetRef.current = 0;
+      trendingHasMoreRef.current = true;
+      setTrendingHasMore(true);
+    }
+
+    try {
+      const offset = trendingOffsetRef.current;
+      const data = await api.explore.getTrending(TRENDING_LIMIT, offset);
+      const items = data.items || [];
+      setTrendingTracks(prev => {
+        const seen = new Set(prev.map(t => t.id));
+        const next = reset ? [] : [...prev];
+        items.forEach(t => {
+          if (!t || t.id == null || seen.has(t.id)) return;
+          seen.add(t.id);
+          next.push(t);
+        });
+        return next;
+      });
+
+      trendingOffsetRef.current = offset + items.length;
+      const hasMore = data.raw?.hasMore;
+      if (hasMore === false) {
+        trendingHasMoreRef.current = false;
+        setTrendingHasMore(false);
+      } else if (hasMore === true) {
+        trendingHasMoreRef.current = true;
+        setTrendingHasMore(true);
+      } else if (items.length < TRENDING_LIMIT) {
+        trendingHasMoreRef.current = false;
+        setTrendingHasMore(false);
+      }
+    } catch (err) {
+      console.error('Error cargando trending:', err);
+    } finally {
+      trendingLoadingRef.current = false;
+      setTrendingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (trendingLoadingRef.current || !trendingHasMoreRef.current) return;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
+        loadTrending(false);
+      }
+    };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
 
   // Cargar datos del usuario
   const loadUserData = async () => {
@@ -496,18 +565,18 @@ const App = () => {
       </div>
 
       {/* Contenido principal */}
-      <div className="flex-1 overflow-y-auto pb-32 md:pb-24 lg:pl-64">
+      <div ref={contentRef} className="flex-1 overflow-y-auto pb-32 md:pb-24 lg:pl-64">
         <div className="p-4 md:p-6">
           {activeTab === 'home' && (
             <div className="space-y-8">
-              {searchResults.length > 0 ? (
+              {trendingTracks.length > 0 ? (
                 <section>
                   <div className="flex items-center gap-2 mb-4">
                     <TrendingUp className="text-[#1db954]" size={24} />
                     <h2 className="text-2xl font-bold">Popular Ahora</h2>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                    {searchResults.slice(0, 10).map((track) => (
+                    {trendingTracks.map((track) => (
                       <TrackCard
                         key={track.id}
                         track={track}
@@ -517,6 +586,11 @@ const App = () => {
                       />
                     ))}
                   </div>
+                  {trendingLoading && (
+                    <div className="flex justify-center py-6">
+                      <Loader className="animate-spin text-[#1db954]" size={28} />
+                    </div>
+                  )}
                 </section>
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-center">

@@ -11,6 +11,13 @@ const PORT = process.env.PORT || 3000;
 // 🔥 Necesario para Render, Vercel, Cloudflare, Nginx, etc.
 app.set("trust proxy", 1);
 
+// Cache simple en memoria para trending
+const TRENDING_TTL_MS = 15 * 60 * 1000;
+const TRENDING_TARGET = 600;
+const TRENDING_BATCH = 8;
+const TRENDING_COUNTRIES = ['us', 'gb', 'br', 'mx', 'es', 'ar', 'fr', 'de', 'it', 'jp', 'kr', 'ca', 'au'];
+let trendingState = { ts: 0, seeds: [], seedCursor: 0, items: [], seenIds: new Set() };
+
 // Middleware
 app.use(helmet());
 app.use(cors({
@@ -102,6 +109,144 @@ async function getRandomAPI() {
   }
 
   return healthy[Math.floor(Math.random() * healthy.length)];
+}
+
+async function searchInAPI(apiBase, query, limit = 1) {
+  if (!apiBase || !query) return null;
+  const url = `${apiBase.replace(/\/+$/, '')}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`;
+  const response = await axios.get(url, { timeout: 10000 });
+  const data = response.data || {};
+  const items = data?.data?.items ?? data?.items ?? [];
+  return items[0] || null;
+}
+
+async function searchAnyAPI(query, limit = 1) {
+  if (!query) return [];
+
+  const envSearch = process.env.SEARCH_API && process.env.SEARCH_API.trim()
+    ? process.env.SEARCH_API.replace(/\/+$/, '')
+    : null;
+
+  if (envSearch) {
+    const url = `${envSearch}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`;
+    const response = await axios.get(url, { timeout: 10000 });
+    const remote = response.data || {};
+    const items = remote?.data?.items ?? remote?.items ?? [];
+    return Array.isArray(items) ? items : [];
+  }
+
+  const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+  const requests = allAPIs.map(api =>
+    axios.get(`${api}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`, { timeout: 10000 })
+      .then(r => ({ ok: true, data: r.data }))
+      .catch(() => ({ ok: false }))
+  );
+
+  const responses = await Promise.all(requests);
+  const success = responses.find(r => r.ok && r.data && r.data.data && Array.isArray(r.data.data.items) && r.data.data.items.length > 0);
+  if (success) {
+    return success.data.data.items;
+  }
+
+  const combinedItems = responses
+    .filter(r => r.ok && r.data)
+    .flatMap(r => r.data.data?.items ?? r.data.items ?? []);
+
+  const uniqueItems = [];
+  const seen = new Set();
+  for (const item of combinedItems) {
+    const idKey = item.id ?? item.trackId ?? JSON.stringify(item);
+    if (!seen.has(idKey)) {
+      seen.add(idKey);
+      uniqueItems.push(item);
+    }
+  }
+
+  return uniqueItems;
+}
+
+function normalizeSeedKey(title, artist) {
+  const t = (title || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const a = (artist || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return `${t}|${a}`;
+}
+
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+async function fetchDeezerSeeds() {
+  try {
+    const url = 'https://api.deezer.com/chart/0/tracks?limit=100&index=0';
+    const resp = await axios.get(url, { timeout: 10000 });
+    const tracks = resp.data?.data ?? [];
+    return tracks.map(t => ({
+      title: t?.title,
+      artist: t?.artist?.name
+    })).filter(t => t.title && t.artist);
+  } catch (e) {
+    console.error('Error Deezer seeds:', e.message);
+    return [];
+  }
+}
+
+async function fetchITunesSeeds(country, limit = 100) {
+  try {
+    const url = `https://itunes.apple.com/${country}/rss/topsongs/limit=${limit}/json`;
+    const resp = await axios.get(url, { timeout: 10000 });
+    const entries = resp.data?.feed?.entry ?? [];
+    return entries.map(e => ({
+      title: e?.['im:name']?.label || e?.title?.label,
+      artist: e?.['im:artist']?.label
+    })).filter(t => t.title && t.artist);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function buildTrendingSeeds() {
+  const deezer = await fetchDeezerSeeds();
+  const itunesLists = await Promise.all(TRENDING_COUNTRIES.map(c => fetchITunesSeeds(c, 100)));
+  const itunes = itunesLists.flat();
+
+  const seen = new Set();
+  const merged = [];
+  for (const seed of [...deezer, ...itunes]) {
+    const key = normalizeSeedKey(seed.title, seed.artist);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(seed);
+  }
+
+  return shuffleArray(merged);
+}
+
+async function ensureTrendingItems(targetCount) {
+  while (trendingState.items.length < targetCount && trendingState.seedCursor < trendingState.seeds.length) {
+    const batch = trendingState.seeds.slice(trendingState.seedCursor, trendingState.seedCursor + TRENDING_BATCH);
+    trendingState.seedCursor += batch.length;
+
+    const results = await Promise.all(batch.map(seed => {
+      const query = [seed.title, seed.artist].filter(Boolean).join(' ');
+      return searchAnyAPI(query, 1)
+        .then(items => (items && items.length > 0 ? items[0] : null))
+        .catch(() => null);
+    }));
+
+    results.forEach(item => {
+      if (!item || item.id == null) return;
+      if (trendingState.seenIds.has(item.id)) return;
+      trendingState.seenIds.add(item.id);
+      trendingState.items.push(item);
+    });
+
+    if (trendingState.items.length >= TRENDING_TARGET) break;
+  }
 }
 
 
@@ -624,6 +769,43 @@ app.get('/api/home', async (req, res) => {
   } catch (error) {
     console.error('Error al obtener home:', error.message);
     res.status(500).json({ error: 'Error al obtener home' });
+  }
+});
+
+// Obtener trending (top tracks) usando Deezer + mapeo a HiFi
+app.get('/api/trending', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '20', 10), 50);
+    const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+
+    if (Date.now() - trendingState.ts > TRENDING_TTL_MS || trendingState.seeds.length === 0) {
+      const seeds = await buildTrendingSeeds();
+      trendingState = {
+        ts: Date.now(),
+        seeds,
+        seedCursor: 0,
+        items: [],
+        seenIds: new Set()
+      };
+    }
+
+    const target = offset + limit;
+    await ensureTrendingItems(target);
+
+    const items = trendingState.items.slice(offset, offset + limit);
+    const hasMore = trendingState.seedCursor < trendingState.seeds.length && trendingState.items.length < TRENDING_TARGET;
+
+    return res.json({
+      items,
+      total: trendingState.items.length,
+      limit,
+      offset,
+      hasMore,
+      source: 'deezer+itunes'
+    });
+  } catch (error) {
+    console.error('Error al obtener trending:', error.message);
+    res.status(500).json({ error: 'Error al obtener trending' });
   }
 });
 
