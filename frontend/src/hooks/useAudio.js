@@ -1,5 +1,5 @@
 // src/hooks/useAudio.js
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../services/api';
 
 let shakaPlayer = null;
@@ -58,6 +58,7 @@ const initShakaPlayer = async (audioElement) => {
 export const useAudio = () => {
   const audioRef = useRef(null);
   const rafRef = useRef(null);
+  const onEndedRef = useRef(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTrack, setCurrentTrack] = useState(null);
@@ -119,6 +120,13 @@ export const useAudio = () => {
         return;
       }
       setIsPlaying(false);
+      if (onEndedRef.current) {
+        try {
+          onEndedRef.current();
+        } catch (e) {
+          console.error('Error en autoplay:', e);
+        }
+      }
     };
 
     const handlePlay = () => setIsPlaying(true);
@@ -174,6 +182,18 @@ export const useAudio = () => {
         
         try {
           const player = await initShakaPlayer(audioElement);
+          if (player && typeof player.unload === 'function') {
+            try {
+              await player.unload();
+            } catch (e) {
+              console.warn('Shaka unload warning:', e);
+            }
+          }
+          if (audioElement) {
+            audioElement.pause();
+            audioElement.removeAttribute('src');
+            audioElement.load();
+          }
           
           // Crear Data URL del manifest DASH (evita HEAD requests en blobs)
           const manifestBase64 = btoa(trackData.manifest);
@@ -339,6 +359,10 @@ export const useAudio = () => {
 
   const toggleMute = () => setIsMuted(!isMuted);
 
+  const setOnEndedCallback = useCallback((fn) => {
+    onEndedRef.current = typeof fn === 'function' ? fn : null;
+  }, []);
+
   // Funciones dummy - los event listeners ya están en el useEffect global
 
 
@@ -366,7 +390,8 @@ export const useAudio = () => {
     toggleMute,
     setIsRepeat,
     setIsShuffle,
-    setQuality       // ⬅ NUEVO
+    setQuality,      // ⬅ NUEVO
+    setOnEndedCallback
   };
 };
 
