@@ -44,7 +44,7 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, favorites = [], currentTr
             <div className="flex-1 min-w-0">
               <h3 className="font-semibold truncate">{track.title}</h3>
               <p className="text-sm text-gray-400 truncate">{getArtistName(track)}</p>
-              <span className="text-xs text-purple-400">
+              <span className="text-xs text-[#1db954]">
                 {track.audioQuality || track.quality || 'HI_RES'}
               </span>
             </div>

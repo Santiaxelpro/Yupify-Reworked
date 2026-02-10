@@ -55,7 +55,7 @@ input[type="range"]::-webkit-slider-thumb {
   height: 14px;
   width: 14px;
   border-radius: 50%;
-  background: #9333ea;
+  background: #1db954;
   cursor: pointer;
   margin-top: -5px;
 }
@@ -64,7 +64,7 @@ input[type="range"]::-moz-range-thumb {
   height: 14px;
   width: 14px;
   border-radius: 50%;
-  background: #9333ea;
+  background: #1db954;
   cursor: pointer;
   border: none;
 }
@@ -116,7 +116,7 @@ input[type="range"]::-moz-range-track {
 }
 
 .gradient-text {
-  background: linear-gradient(to right, #9333ea, #ec4899);
+  background: linear-gradient(to right, #1db954, #22c55e);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

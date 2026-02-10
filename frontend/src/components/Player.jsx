@@ -42,9 +42,12 @@ const Player = ({
 
   // 🔥 AGREGAR ESTO
   quality = "LOSSLESS",
-  onChangeQuality = () => {}
+  onChangeQuality = () => {},
+  preloadedLyrics = null
 }) => {
-  const purple = '#9333ea';
+  const accent = '#1db954';
+  const accentSoft = 'rgba(29,185,84,0.4)';
+  const accentBg = 'rgba(29,185,84,0.08)';
   // ----------------------
   // 🔥 LYRICS MODAL
   // ----------------------
@@ -54,6 +57,109 @@ const Player = ({
   const linesRef = React.useRef([]);
   const [activeLineIndex, setActiveLineIndex] = React.useState(-1);
   const [activeSyllableIndex, setActiveSyllableIndex] = React.useState(-1);
+
+  const toMs = (t) => {
+    if (t == null) return 0;
+    const num = Number(t);
+    if (Number.isNaN(num)) return 0;
+    return num;
+  };
+
+  const toSeconds = (t) => {
+    const ms = toMs(t);
+    return ms / 1000;
+  };
+
+  const normalizeLyricsPayload = (payload) => {
+    const raw = payload?.raw ?? payload;
+    if (!raw) return { structured: null, text: "No se encontraron letras." };
+    const data = raw?.data ?? raw;
+
+    if (typeof data === 'string') {
+      return { structured: null, text: data };
+    }
+
+    if (data.lyrics && typeof data.lyrics === 'string') {
+      return { structured: null, text: data.lyrics };
+    }
+
+    if (data.result && typeof data.result === 'string') {
+      return { structured: null, text: data.result };
+    }
+
+    if (data.lyrics && Array.isArray(data.lyrics) && data.lyrics.length > 0) {
+      const timesMs = data.lyrics.map(l => toMs(l?.time));
+      const validTimes = timesMs.filter(t => Number.isFinite(t) && t > 0);
+      const hasTiming = validTimes.length >= 2;
+
+      let finalTimesMs = null;
+      if (hasTiming) {
+        finalTimesMs = timesMs;
+      } else {
+        const durationsMs = data.lyrics.map(l => toMs(l?.duration));
+        const validDurations = durationsMs.filter(d => Number.isFinite(d) && d > 0);
+        if (validDurations.length >= 2) {
+          let acc = 0;
+          finalTimesMs = durationsMs.map((d) => {
+            const t = acc;
+            acc += d || 0;
+            return t;
+          });
+        }
+      }
+
+      const isUntimed = data.type === 'None' || !finalTimesMs;
+
+      if (isUntimed) {
+        const lines = data.lyrics
+          .map(l => (l && typeof l.text === 'string' ? l.text.trim() : ''))
+          .filter(Boolean);
+        return {
+          structured: null,
+          text: lines.length > 0 ? lines.join('\n') : "No se encontraron letras."
+        };
+      }
+
+      const structured = data.lyrics.map((line, idx) => {
+        const syllabusRaw = Array.isArray(line.syllabus) ? line.syllabus : [];
+        const validSyllableTimes = syllabusRaw.filter(s => {
+          const t = toMs(s?.time);
+          return Number.isFinite(t) && t > 0;
+        });
+
+        const syllabus = validSyllableTimes.length > 0
+          ? syllabusRaw.map((s, si) => ({
+              id: si,
+              time: toSeconds(s.time),
+              duration: toSeconds(s.duration),
+              text: s.text || ''
+            }))
+          : [];
+
+        return {
+          id: idx,
+          time: toSeconds(finalTimesMs[idx]),
+          duration: toSeconds(line.duration),
+          text: line.text || '',
+          syllabus
+        };
+      });
+
+      return { structured, text: '' };
+    }
+
+    return { structured: null, text: "No se encontraron letras." };
+  };
+
+  const getAbsoluteSyllableTime = (line, syllable) => {
+    if (!syllable || syllable.time == null) return 0;
+    const sTime = Number(syllable.time);
+    if (Number.isNaN(sTime)) return 0;
+    const lTime = line?.time != null ? Number(line.time) : 0;
+    if (Number.isNaN(lTime)) return sTime;
+    if (lTime > 0 && sTime < lTime) return sTime + lTime;
+    return sTime;
+  };
 
   // Función que busca sílaba en un tiempo dado
   const findActiveSyllable = React.useCallback((timeSeconds) => {
@@ -76,7 +182,8 @@ const Player = ({
     const line = lyricsStructured[foundLine];
     if (line.syllabus) {
       for (let j = 0; j < line.syllabus.length; j++) {
-        if (line.syllabus[j].time <= timeSeconds) {
+        const syllableTime = getAbsoluteSyllableTime(line, line.syllabus[j]);
+        if (syllableTime <= timeSeconds) {
           foundSyll = j;
         } else {
           break;
@@ -103,6 +210,13 @@ const Player = ({
     }
   }, [currentTime, lyricsStructured, findActiveSyllable]);
 
+  React.useEffect(() => {
+    if (!lyricsOpen || !preloadedLyrics) return;
+    const { structured, text } = normalizeLyricsPayload(preloadedLyrics);
+    setLyricsStructured(structured);
+    setLyricsContent(text || '');
+  }, [lyricsOpen, preloadedLyrics]);
+
   // Click handler para seek a una sílaba
   const handleSyllableClick = React.useCallback((syllableTime) => {
     const audio = document.getElementById('yupify-audio-player');
@@ -119,46 +233,16 @@ const Player = ({
     setLyricsContent("Cargando letras...");
 
     try {
-      const response = await api.track.getLyrics(currentTrack.title, getArtistName(currentTrack));
-      const data = response.raw;
-      // Si la respuesta contiene estructura temporal tipo LRC (array con syllabus)
-      // API SIEMPRE entrega tiempos en milisegundos, convertir a segundos
-      const toSeconds = (t) => {
-        if (t == null) return 0;
-        const num = Number(t);
-        if (Number.isNaN(num)) return 0;
-        // Dividir por 1000: ms → segundos
-        return num / 1000;
-      };
+      let payload = preloadedLyrics;
+      let parsed = normalizeLyricsPayload(payload);
 
-      if (data && Array.isArray(data.lyrics) && data.lyrics.length > 0 && data.lyrics[0].syllabus) {
-        const structured = data.lyrics.map((line, idx) => ({
-          id: idx,
-          time: toSeconds(line.time),
-          duration: toSeconds(line.duration),
-          text: line.text || '',
-          syllabus: Array.isArray(line.syllabus) ? line.syllabus.map((s, si) => ({
-            id: si,
-            time: toSeconds(s.time),
-            duration: toSeconds(s.duration),
-            text: s.text || ''
-          })) : []
-        }));
-
-        setLyricsStructured(structured);
-        setLyricsContent('');
-      } else {
-        // Fallback a texto plano como antes
-        let lyricsText = "";
-        if (!data) lyricsText = "No se encontraron letras.";
-        else if (typeof data === 'string') lyricsText = data;
-        else if (data.lyrics && typeof data.lyrics === 'string') lyricsText = data.lyrics;
-        else if (data.result && typeof data.result === 'string') lyricsText = data.result;
-        else lyricsText = JSON.stringify(data, null, 2);
-
-        setLyricsStructured(null);
-        setLyricsContent(lyricsText || "No se encontraron letras.");
+      if (!payload || (!parsed.structured && (!parsed.text || parsed.text === "No se encontraron letras."))) {
+        payload = await api.track.getLyrics(currentTrack.title, getArtistName(currentTrack));
+        parsed = normalizeLyricsPayload(payload);
       }
+
+      setLyricsStructured(parsed.structured);
+      setLyricsContent(parsed.text || '');
     } catch (err) {
       setLyricsContent("Error al obtener letras.");
     }
@@ -195,16 +279,16 @@ const Player = ({
           width: 14px;
           height: 14px;
           border-radius: 50%;
-          background: ${purple};
-          box-shadow: 0 0 0 6px rgba(147,51,234,0.12);
+          background: ${accent};
+          box-shadow: 0 0 0 6px rgba(29,185,84,0.18);
           margin-top: -2px; /* center the thumb */
         }
-        .yupify-range:focus { box-shadow: 0 0 0 4px rgba(147,51,234,0.08); }
+        .yupify-range:focus { box-shadow: 0 0 0 4px rgba(29,185,84,0.18); }
         .yupify-range::-moz-range-track { height:10px; border-radius:999px; }
-        .yupify-range::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background: ${purple}; }
+        .yupify-range::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background: ${accent}; }
         
         .lyrics-container {
-          scrollbar-color: ${purple} transparent;
+          scrollbar-color: ${accent} transparent;
           scrollbar-width: thin;
         }
         .lyrics-container::-webkit-scrollbar {
@@ -214,7 +298,7 @@ const Player = ({
           background: transparent;
         }
         .lyrics-container::-webkit-scrollbar-thumb {
-          background: ${purple};
+          background: ${accent};
           border-radius: 999px;
         }
       `}</style>
@@ -225,46 +309,60 @@ const Player = ({
           onClick={() => setLyricsOpen(false)}
         >
           <div
-            className="bg-gray-900 p-8 rounded-2xl max-w-3xl w-full max-h-[85vh] border border-purple-500/30 shadow-2xl flex flex-col"
+            className="bg-gray-900 p-8 rounded-2xl max-w-3xl w-full max-h-[85vh] border shadow-2xl flex flex-col"
+            style={{ borderColor: 'rgba(29,185,84,0.3)' }}
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-2xl font-bold mb-6 text-white">
-              🎤 Letras de <span className="text-purple-400">{currentTrack.title}</span>
+              🎤 Letras de <span style={{ color: accent }}>{currentTrack.title}</span>
             </h2>
 
             {lyricsStructured ? (
               <div className="lyrics-container text-gray-100 leading-relaxed space-y-4 flex-1 overflow-y-auto pr-2">
-                {lyricsStructured.map((line, li) => (
-                  <div
-                    key={line.id}
-                    ref={(el) => (linesRef.current[li] = el)}
-                    className="text-base lg:text-lg py-2 cursor-pointer hover:opacity-80 transition-opacity"
-                    onClick={() => {
-                      if (line.time != null) handleSyllableClick(line.time);
-                    }}
-                  >
-                    {line.syllabus.length > 0 ? (
-                      line.syllabus.map((s, si) => {
-                        const isSung = li === activeLineIndex && si <= activeSyllableIndex;
-                        return (
-                          <span
-                            key={s.id}
-                            className={isSung ? 'text-purple-400 font-bold text-lg drop-shadow-md' : 'text-gray-500'}
-                            style={{ transition: 'all 0.08s ease-out', cursor: 'pointer' }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (s.time != null) handleSyllableClick(s.time);
-                            }}
-                          >
-                            {s.text}
-                          </span>
-                        );
-                      })
-                    ) : (
-                      <span className="text-gray-300">{line.text}</span>
-                    )}
-                  </div>
-                ))}
+                {lyricsStructured.map((line, li) => {
+                  const isActiveLine = li === activeLineIndex;
+                  const hasSyllabus = line.syllabus && line.syllabus.length > 0;
+                  return (
+                    <div
+                      key={line.id}
+                      ref={(el) => (linesRef.current[li] = el)}
+                      className="text-base lg:text-lg py-2 cursor-pointer hover:opacity-80 transition-opacity rounded-md px-2"
+                      style={isActiveLine ? { backgroundColor: accentBg } : undefined}
+                      onClick={() => {
+                        if (Number.isFinite(line.time)) handleSyllableClick(line.time);
+                      }}
+                    >
+                      {hasSyllabus ? (
+                        line.syllabus.map((s, si) => {
+                          const isSung = li === activeLineIndex && si <= activeSyllableIndex;
+                          const syllableTime = getAbsoluteSyllableTime(line, s);
+                          const isActiveSyllableLine = li === activeLineIndex;
+                          return (
+                            <span
+                              key={s.id}
+                              className={isSung ? 'font-bold text-lg drop-shadow-md' : 'text-gray-500'}
+                              style={{
+                                transition: 'all 0.08s ease-out',
+                                cursor: 'pointer',
+                                color: isSung ? accent : (isActiveSyllableLine ? accentSoft : undefined)
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (Number.isFinite(syllableTime)) handleSyllableClick(syllableTime);
+                              }}
+                            >
+                              {s.text}
+                            </span>
+                          );
+                        })
+                      ) : (
+                        <span style={{ color: isActiveLine ? accent : undefined }} className={isActiveLine ? 'font-bold' : 'text-gray-300'}>
+                          {line.text}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <pre className="whitespace-pre-wrap text-gray-300 leading-relaxed flex-1 overflow-y-auto">
@@ -274,7 +372,8 @@ const Player = ({
 
             <button
               onClick={() => setLyricsOpen(false)}
-              className="mt-6 w-full py-3 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition"
+              className="mt-6 w-full py-3 rounded-lg font-semibold transition"
+              style={{ backgroundColor: accent }}
             >
               Cerrar
             </button>
@@ -318,7 +417,7 @@ const Player = ({
             <p className="text-sm text-gray-400 truncate">
               {getArtistName(currentTrack)}
             </p>
-            <span className="text-xs text-purple-400">LOSSLESS</span>
+            <span className="text-xs" style={{ color: accent }}>LOSSLESS</span>
           </div>
 
           <button onClick={onToggleFavorite}>
@@ -350,7 +449,7 @@ const Player = ({
               onChange={(e) => onSeek(Number(e.target.value))}
               className="flex-1 yupify-range"
               style={{
-                background: `linear-gradient(90deg, ${purple} ${duration ? (currentTime / duration) * 100 : 0}%, rgba(255,255,255,0.06) ${duration ? (currentTime / duration) * 100 : 0}%)`
+                background: `linear-gradient(90deg, ${accent} ${duration ? (currentTime / duration) * 100 : 0}%, rgba(255,255,255,0.06) ${duration ? (currentTime / duration) * 100 : 0}%)`
               }}
             />
 
@@ -370,7 +469,8 @@ const Player = ({
 
           <button
             onClick={onTogglePlay}
-            className="bg-green-600 hover:bg-green-700 rounded-full p-4"
+            className="rounded-full p-4 hover:opacity-90"
+            style={{ backgroundColor: accent }}
           >
             {isPlaying ? <Pause size={28} /> : <Play size={28} />}
           </button>

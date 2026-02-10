@@ -56,6 +56,9 @@ const App = () => {
   const playedTitleRef = useRef(new Set());
   const autoNextInFlightRef = useRef(false);
   const autoNextRef = useRef(null);
+  const autoplaySeedRef = useRef(null);
+  const lyricsInFlightRef = useRef(new Set());
+  const [lyricsCache, setLyricsCache] = useState({});
   const [favorites, setFavorites] = useState([]);
   const [myPlaylists, setMyPlaylists] = useState([]);
   const [history, setHistory] = useState([]);
@@ -216,6 +219,60 @@ const App = () => {
     return null;
   };
 
+  useEffect(() => {
+    if (autoplaySeedRef.current != null) return;
+    const key = 'yupify_autoplay_seed';
+    const stored = sessionStorage.getItem(key);
+    let seed = Number(stored);
+    if (!Number.isFinite(seed)) {
+      seed = Math.floor(Math.random() * 1_000_000_000);
+      sessionStorage.setItem(key, String(seed));
+    }
+    autoplaySeedRef.current = seed;
+  }, []);
+
+  useEffect(() => {
+    if (!currentTrack) return;
+    const key = getLyricsKey(currentTrack);
+    if (!key) return;
+    if (lyricsCache[key]) return;
+    if (lyricsInFlightRef.current.has(key)) return;
+
+    lyricsInFlightRef.current.add(key);
+    api.track
+      .getLyrics(currentTrack.title, getArtistName(currentTrack))
+      .then(response => {
+        const raw = response?.raw ?? response;
+        setLyricsCache(prev => ({ ...prev, [key]: raw }));
+      })
+      .catch(err => {
+        console.error('Error precargando letras:', err);
+      })
+      .finally(() => {
+        lyricsInFlightRef.current.delete(key);
+      });
+  }, [currentTrack, lyricsCache]);
+
+  const seededRandom = (seed) => {
+    let t = seed + 0x6D2B79F5;
+    return () => {
+      t += 0x6D2B79F5;
+      let r = Math.imul(t ^ (t >>> 15), 1 | t);
+      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+
+  const seededShuffle = (array, seed) => {
+    const shuffled = [...array];
+    const rand = seededRandom(seed);
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+  };
+
   const normalizeTitle = (text) => {
     if (!text) return '';
     return text
@@ -226,6 +283,14 @@ const App = () => {
       .replace(/[^a-z0-9à-öø-ÿ\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+  };
+
+  const getLyricsKey = (track) => {
+    if (!track) return '';
+    const artist = getArtistName(track);
+    const title = track.title || '';
+    const id = track.id ?? '';
+    return `${id}|${title}|${artist}`.toLowerCase();
   };
 
   const getFirstWord = (text) => {
@@ -300,7 +365,10 @@ const App = () => {
         return true;
       });
 
-      return isShuffle ? shuffleArray(filtered) : filtered;
+      const seedBase = autoplaySeedRef.current ?? 0;
+      const seed = seedBase ^ (currentTrack.id ?? 0);
+      const diversified = seededShuffle(filtered, seed);
+      return isShuffle ? shuffleArray(diversified) : diversified;
     } catch (err) {
       console.error('Error en autoplay:', err);
       return [];
@@ -383,6 +451,9 @@ const App = () => {
     setShowUserMenu(false);
   };
 
+  const lyricsKey = getLyricsKey(currentTrack);
+  const preloadedLyrics = lyricsKey ? lyricsCache[lyricsKey] : null;
+
   return (
     <div className="flex flex-col h-screen bg-black text-white overflow-hidden">
       {/* Header */}
@@ -432,7 +503,7 @@ const App = () => {
               {searchResults.length > 0 ? (
                 <section>
                   <div className="flex items-center gap-2 mb-4">
-                    <TrendingUp className="text-purple-400" size={24} />
+                    <TrendingUp className="text-[#1db954]" size={24} />
                     <h2 className="text-2xl font-bold">Popular Ahora</h2>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
@@ -461,7 +532,7 @@ const App = () => {
               <h2 className="text-2xl font-bold mb-4">Resultados de Búsqueda</h2>
               {loading ? (
                 <div className="flex justify-center py-12">
-                  <Loader className="animate-spin text-purple-500" size={48} />
+                  <Loader className="animate-spin text-[#1db954]" size={48} />
                 </div>
               ) : searchResults.length > 0 ? (
                 <TrackList
@@ -506,7 +577,7 @@ const App = () => {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div 
                   onClick={() => isAuthenticated ? setActiveTab('favorites') : setShowAuthModal(true)}
-                  className="bg-gradient-to-br from-purple-600 to-pink-600 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all"
+                  className="bg-gradient-to-br from-[#1db954] to-emerald-400 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all"
                 >
                   <Heart size={32} className="mb-2" />
                   <h3 className="font-bold">Favoritos</h3>
@@ -585,6 +656,7 @@ const App = () => {
   onTimeUpdate={handleTimeUpdate}
   onEnded={handleEnded}
   audioRef={audioRef}
+  preloadedLyrics={preloadedLyrics}
 
   // Control de calidad
   quality={quality}

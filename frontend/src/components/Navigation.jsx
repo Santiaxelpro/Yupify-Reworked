@@ -85,7 +85,7 @@ const Navigation = ({
                 onClick={onToggleUserMenu}
                 className="w-full flex items-center gap-3 px-4 py-3 rounded-lg bg-gray-800/50 hover:bg-gray-700 transition-all"
               >
-                <div className="w-10 h-10 rounded-full bg-gradient-to-r from-purple-600 to-pink-600 flex items-center justify-center flex-shrink-0">
+                <div className="w-10 h-10 rounded-full bg-gradient-to-r from-[#1db954] to-emerald-400 flex items-center justify-center flex-shrink-0">
                   <span className="text-white font-bold text-sm">
                     {user.name?.charAt(0).toUpperCase() || '?'}
                   </span>

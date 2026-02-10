@@ -138,10 +138,10 @@ export const getDominantColor = (imageUrl) => {
   // Retorna colores por defecto
   // En producción, usar una librería como color-thief
   const colors = [
-    '#9333ea', // purple
-    '#ec4899', // pink
-    '#3b82f6', // blue
+    '#1db954', // green
+    '#22c55e', // green light
     '#10b981', // green
+    '#3b82f6', // blue
     '#f59e0b', // orange
   ];
   return colors[Math.floor(Math.random() * colors.length)];

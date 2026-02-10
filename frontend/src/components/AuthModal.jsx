@@ -61,7 +61,7 @@ const AuthModal = ({ isOpen, onClose, onLogin, onRegister, loading, error }) => 
                 onChange={handleChange}
                 required={mode === 'register'}
                 disabled={loading}
-                className="w-full bg-gray-800 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                className="w-full bg-gray-800 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[#1db954] disabled:opacity-50"
                 placeholder="Tu nombre"
               />
             </div>
@@ -76,7 +76,7 @@ const AuthModal = ({ isOpen, onClose, onLogin, onRegister, loading, error }) => 
               onChange={handleChange}
               required
               disabled={loading}
-              className="w-full bg-gray-800 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+              className="w-full bg-gray-800 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[#1db954] disabled:opacity-50"
               placeholder="tu@email.com"
             />
           </div>
@@ -90,7 +90,7 @@ const AuthModal = ({ isOpen, onClose, onLogin, onRegister, loading, error }) => 
               onChange={handleChange}
               required
               disabled={loading}
-              className="w-full bg-gray-800 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+              className="w-full bg-gray-800 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[#1db954] disabled:opacity-50"
               placeholder="••••••••"
               minLength={6}
             />
