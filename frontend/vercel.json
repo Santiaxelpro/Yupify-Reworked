@@ -26,18 +26,21 @@
       ]
     }
   ],
-  "routes": [
-    { "handle": "filesystem" },
+  "rewrites": [
     {
-      "src": "/api/(.*)",
-      "dest": "https://yupify-reworked.onrender.com/api/$1"
+      "source": "/api/:path*",
+      "destination": "https://yupify-reworked.onrender.com/api/:path*"
     },
-    { "src": "/health", "dest": "https://yupify-reworked.onrender.com/health" },
-    { "src": "/assets/(.*)", "dest": "/assets/$1" },
     {
-      "src": "/(.*)\\.(js|css|png|jpg|jpeg|svg|ico|map|woff2?)",
-      "dest": "/$1"
+      "source": "/health",
+      "destination": "https://yupify-reworked.onrender.com/health"
     },
-    { "src": "/(.*)", "dest": "/index.html" }
+    {
+      "source": "/:path*",
+      "has": [
+        { "type": "header", "key": "accept", "value": "text/html.*" }
+      ],
+      "destination": "/index.html"
+    }
   ]
 }
