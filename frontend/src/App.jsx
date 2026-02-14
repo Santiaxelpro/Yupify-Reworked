@@ -5,6 +5,7 @@ import { Music, TrendingUp, Disc, Heart, Clock, Plus, Loader } from 'lucide-reac
 // Hooks
 import useAudio from './hooks/useAudio';
 import useAuth from './hooks/useAuth';
+import useMediaSession from './hooks/useMediaSession';
 
 // Components
 import Player from './components/Player';
@@ -16,7 +17,15 @@ import Navigation from './components/Navigation';
 
 // Services
 import api from './services/api';
-import { getArtistName, shuffleArray } from './utils/helpers';
+import { getArtistName } from './utils/helpers';
+import {
+  buildCandidates,
+  rankWithMMR,
+  normalizeText,
+  getGenreTerm,
+  getAlbumTerm,
+  getTrackKey
+} from './utils/autoplay';
 
 const App = () => {
   // Audio hook
@@ -34,6 +43,8 @@ const App = () => {
     setQuality,
     audioRef,
     togglePlay,
+    playCurrent,
+    pauseWithFade,
     playTrack,
     handleTimeUpdate,
     handleSeek,
@@ -56,7 +67,7 @@ const App = () => {
   const playedTitleRef = useRef(new Set());
   const autoNextInFlightRef = useRef(false);
   const autoNextRef = useRef(null);
-  const autoplaySeedRef = useRef(null);
+  const autoplayRunIdRef = useRef(0);
   const lyricsInFlightRef = useRef(new Set());
   const [lyricsCache, setLyricsCache] = useState({});
   const [favorites, setFavorites] = useState([]);
@@ -66,6 +77,10 @@ const App = () => {
   const [myPlaylists, setMyPlaylists] = useState([]);
   const [history, setHistory] = useState([]);
   const [homeContent, setHomeContent] = useState(null);
+  const sessionSeedRef = useRef(null);
+  if (!sessionSeedRef.current) {
+    sessionSeedRef.current = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
   
   // Estados UI
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -198,7 +213,7 @@ const App = () => {
       playedRef.current.add(track.id);
     }
     if (track?.title) {
-      const normalized = normalizeTitle(track.title);
+      const normalized = normalizeText(track.title);
       if (normalized) {
         playedTitleRef.current.add(normalized);
       }
@@ -289,18 +304,6 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (autoplaySeedRef.current != null) return;
-    const key = 'yupify_autoplay_seed';
-    const stored = sessionStorage.getItem(key);
-    let seed = Number(stored);
-    if (!Number.isFinite(seed)) {
-      seed = Math.floor(Math.random() * 1_000_000_000);
-      sessionStorage.setItem(key, String(seed));
-    }
-    autoplaySeedRef.current = seed;
-  }, []);
-
-  useEffect(() => {
     if (!currentTrack) return;
     const key = getLyricsKey(currentTrack);
     if (!key) return;
@@ -322,38 +325,6 @@ const App = () => {
       });
   }, [currentTrack, lyricsCache]);
 
-  const seededRandom = (seed) => {
-    let t = seed + 0x6D2B79F5;
-    return () => {
-      t += 0x6D2B79F5;
-      let r = Math.imul(t ^ (t >>> 15), 1 | t);
-      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
-      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
-    };
-  };
-
-  const seededShuffle = (array, seed) => {
-    const shuffled = [...array];
-    const rand = seededRandom(seed);
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    return shuffled;
-  };
-
-  const normalizeTitle = (text) => {
-    if (!text) return '';
-    return text
-      .toString()
-      .toLowerCase()
-      .replace(/\(.*?\)/g, ' ')
-      .replace(/\[.*?\]/g, ' ')
-      .replace(/[^a-z0-9à-öø-ÿ\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  };
-
   const getLyricsKey = (track) => {
     if (!track) return '';
     const artist = getArtistName(track);
@@ -362,82 +333,124 @@ const App = () => {
     return `${id}|${title}|${artist}`.toLowerCase();
   };
 
-  const getFirstWord = (text) => {
-    if (!text) return '';
-    const cleaned = text
-      .replace(/\(.*?\)/g, ' ')
-      .replace(/\[.*?\]/g, ' ')
-      .replace(/[^A-Za-z0-9À-ÖØ-öø-ÿ\s]/g, ' ')
-      .trim();
-    if (!cleaned) return '';
-    const word = cleaned.split(/\s+/)[0];
-    return word.length >= 3 ? word : '';
-  };
+  const buildAutoplayContext = (current, trendingSource, maxPlays) => {
+    const favoriteIds = new Set();
+    const favoriteKeys = new Set();
+    favorites.forEach(track => {
+      if (!track) return;
+      if (track.id != null) favoriteIds.add(track.id);
+      const key = getTrackKey(track);
+      if (key) favoriteKeys.add(key);
+    });
 
-  const getGenreTerm = (track) => {
-    if (!track) return '';
-    if (typeof track.genre === 'string') return track.genre;
-    if (track.genre?.name) return track.genre.name;
-    if (Array.isArray(track.genres) && track.genres.length > 0) {
-      const first = track.genres[0];
-      if (typeof first === 'string') return first;
-      if (first?.name) return first.name;
-    }
-    return '';
+    const historyIndexById = new Map();
+    const historyIndexByKey = new Map();
+    history.forEach((track, index) => {
+      if (!track) return;
+      if (track.id != null && !historyIndexById.has(track.id)) {
+        historyIndexById.set(track.id, index);
+      }
+      const key = getTrackKey(track);
+      if (key && !historyIndexByKey.has(key)) {
+        historyIndexByKey.set(key, index);
+      }
+    });
+
+    const trendingIds = new Set(
+      (trendingSource || [])
+        .map(track => track?.id)
+        .filter(id => id != null)
+    );
+
+    return {
+      currentTrack: current,
+      favoriteIds,
+      favoriteKeys,
+      historyIndexById,
+      historyIndexByKey,
+      historyLength: history.length,
+      trendingIds,
+      maxPlays,
+      sessionSeed: sessionSeedRef.current,
+      sessionJitter: 0.03,
+      relatednessFloor: 0.12,
+      minRelated: 10
+    };
   };
 
   const fetchAutoplayTracks = async () => {
     if (!currentTrack) return [];
 
-    const artistName = getArtistName(currentTrack);
-    const useArtist = artistName && artistName !== 'Artista Desconocido';
-    const titleFirstWord = getFirstWord(currentTrack.title);
-    const genreTerm = getGenreTerm(currentTrack);
-    const currentTitleNorm = normalizeTitle(currentTrack.title);
+    const runId = ++autoplayRunIdRef.current;
+    const currentSnapshot = currentTrack;
+    const currentId = currentSnapshot?.id ?? null;
 
     try {
-      const queries = [];
-      if (titleFirstWord) queries.push({ type: 'query', value: titleFirstWord });
-      if (useArtist) queries.push({ type: 'artist', value: artistName });
-      if (genreTerm) queries.push({ type: 'query', value: genreTerm });
-      if (currentTrack.title) queries.push({ type: 'query', value: currentTrack.title });
+      const artistName = getArtistName(currentSnapshot);
+      const useArtist = artistName && artistName !== 'Artista Desconocido';
+      const genreTerm = getGenreTerm(currentSnapshot);
+      const albumTerm = getAlbumTerm(currentSnapshot);
 
-      let items = [];
-      for (const q of queries) {
-        if (q.type === 'artist') {
-          const artistResults = await api.search.searchArtist(q.value, 25);
-          items = artistResults.items || [];
-          if (items.length === 0) {
-            const fallbackArtist = await api.search.search(q.value, 25);
-            items = fallbackArtist.items || [];
-          }
-        } else {
-          const res = await api.search.search(q.value, 25);
-          items = res.items || [];
-        }
-        if (items.length > 0) break;
+      const searchPromises = [];
+      if (useArtist) {
+        searchPromises.push(api.search.searchArtist(artistName, 25));
+        searchPromises.push(api.search.search(artistName, 20));
+      }
+      if (genreTerm) searchPromises.push(api.search.search(genreTerm, 20));
+      if (albumTerm) searchPromises.push(api.search.searchAlbum(albumTerm, 20));
+      if (useArtist && genreTerm) searchPromises.push(api.search.search(`${artistName} ${genreTerm}`, 20));
+
+      const searchResults = await Promise.allSettled(searchPromises);
+      if (runId !== autoplayRunIdRef.current || currentTrack?.id !== currentId) return [];
+
+      const searchItems = searchResults.flatMap(result => (
+        result.status == 'fulfilled' ? (result.value?.items || []) : []
+      ));
+
+      let trendingSource = trendingTracks;
+      if (!Array.isArray(trendingSource) || trendingSource.length === 0) {
+        const trendingData = await api.explore.getTrending(20, 0).catch(() => null);
+        trendingSource = trendingData?.items || [];
       }
 
-      const existingIds = new Set(queue.map(t => t.id));
-      const playedIds = playedRef.current;
+      if (runId !== autoplayRunIdRef.current || currentTrack?.id !== currentId) return [];
 
-      const filtered = items.filter(t => {
-        if (!t || t.id == null) return false;
-        if (t.id === currentTrack.id) return false;
-        if (existingIds.has(t.id)) return false;
-        if (playedIds.has(t.id)) return false;
-
-        const candidateTitleNorm = normalizeTitle(t.title);
-        if (currentTitleNorm && candidateTitleNorm === currentTitleNorm) return false;
-        if (candidateTitleNorm && playedTitleRef.current.has(candidateTitleNorm)) return false;
-
-        return true;
+      const candidates = buildCandidates({
+        sources: [searchItems, favorites, history, trendingSource],
+        currentTrack: currentSnapshot,
+        queue,
+        playedIds: playedRef.current,
+        playedTitleKeys: playedTitleRef.current,
+        recentArtists: [],
+        limit: 300
       });
 
-      const seedBase = autoplaySeedRef.current ?? 0;
-      const seed = seedBase ^ (currentTrack.id ?? 0);
-      const diversified = seededShuffle(filtered, seed);
-      return isShuffle ? shuffleArray(diversified) : diversified;
+      const maxPlays = candidates.reduce((max, track) => {
+        const plays = Number(track?.plays);
+        return Number.isFinite(plays) ? Math.max(max, plays) : max;
+      }, 0);
+      const context = buildAutoplayContext(currentSnapshot, trendingSource, maxPlays);
+      let ranked = rankWithMMR(candidates, context, 20);
+
+      if (ranked.length === 0 && trendingSource.length > 0) {
+        const fallbackCandidates = buildCandidates({
+          sources: [trendingSource],
+          currentTrack: currentSnapshot,
+          queue,
+          playedIds: playedRef.current,
+          playedTitleKeys: playedTitleRef.current,
+          recentArtists: [],
+          limit: 200
+        });
+        const fallbackMaxPlays = fallbackCandidates.reduce((max, track) => {
+          const plays = Number(track?.plays);
+          return Number.isFinite(plays) ? Math.max(max, plays) : max;
+        }, 0);
+        const fallbackContext = buildAutoplayContext(currentSnapshot, trendingSource, fallbackMaxPlays);
+        ranked = rankWithMMR(fallbackCandidates, fallbackContext, 20);
+      }
+
+      return ranked;
     } catch (err) {
       console.error('Error en autoplay:', err);
       return [];
@@ -449,17 +462,17 @@ const App = () => {
     autoNextInFlightRef.current = true;
 
     try {
-    const nextFromQueue = getNextTrackFromQueue();
-    if (nextFromQueue) {
-      handlePlayTrack(nextFromQueue);
-      return;
-    }
+      const nextFromQueue = getNextTrackFromQueue();
+      if (nextFromQueue) {
+        handlePlayTrack(nextFromQueue);
+        return;
+      }
 
-    const autoplayTracks = await fetchAutoplayTracks();
-    if (autoplayTracks.length > 0) {
-      appendToQueue(autoplayTracks);
-      handlePlayTrack(autoplayTracks[0]);
-    }
+      const autoplayTracks = await fetchAutoplayTracks();
+      if (autoplayTracks.length > 0) {
+        appendToQueue(autoplayTracks);
+        handlePlayTrack(autoplayTracks[0]);
+      }
     } finally {
       autoNextInFlightRef.current = false;
     }
@@ -490,6 +503,18 @@ const App = () => {
       handlePlayTrack(queue[currentIndex - 1]);
     }
   };
+
+  useMediaSession({
+    currentTrack,
+    isPlaying,
+    currentTime,
+    duration,
+    audioRef,
+    onPlay: playCurrent,
+    onPause: pauseWithFade,
+    onNext: handleSkipNext,
+    onPrevious: handleSkipPrevious
+  });
 
   // Auth handlers
   const handleLogin = async (email, password) => {

@@ -59,6 +59,8 @@ export const useAudio = () => {
   const audioRef = useRef(null);
   const rafRef = useRef(null);
   const onEndedRef = useRef(null);
+  const fadeRafRef = useRef(null);
+  const fadeActiveRef = useRef(false);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTrack, setCurrentTrack] = useState(null);
@@ -69,9 +71,19 @@ export const useAudio = () => {
 
   const [volume, setVolume] = useState(0.7);
   const [isMuted, setIsMuted] = useState(false);
+  const volumeRef = useRef(volume);
+  const isMutedRef = useRef(isMuted);
 
   const [isRepeat, setIsRepeat] = useState(false);
   const [isShuffle, setIsShuffle] = useState(false);
+
+  useEffect(() => {
+    volumeRef.current = volume;
+  }, [volume]);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
 
   // ============================
   // 🔥 NUEVO: Calidad de audio global
@@ -84,6 +96,61 @@ export const useAudio = () => {
   useEffect(() => {
     isRepeatRef.current = isRepeat;
   }, [isRepeat]);
+
+  const getTargetVolume = useCallback(() => (
+    isMutedRef.current ? 0 : volumeRef.current
+  ), []);
+
+  const cancelFade = useCallback(() => {
+    if (fadeRafRef.current && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(fadeRafRef.current);
+    }
+    fadeRafRef.current = null;
+    fadeActiveRef.current = false;
+  }, []);
+
+  const fadeOutAndPause = useCallback((audio, durationMs = 320) => {
+    if (!audio) return;
+
+    if (typeof requestAnimationFrame !== 'function') {
+      audio.pause();
+      audio.volume = getTargetVolume();
+      return;
+    }
+
+    cancelFade();
+
+    const from = Number.isFinite(audio.volume) ? audio.volume : getTargetVolume();
+    if (audio.paused || from <= 0.01) {
+      audio.pause();
+      audio.volume = getTargetVolume();
+      return;
+    }
+
+    const duration = Math.max(120, durationMs);
+    const start = performance.now();
+    fadeActiveRef.current = true;
+
+    const step = (now) => {
+      if (!fadeActiveRef.current) return;
+      const elapsed = now - start;
+      const t = Math.min(1, elapsed / duration);
+      const nextVolume = from * (1 - t);
+      audio.volume = Math.max(0, Math.min(1, nextVolume));
+
+      if (t < 1) {
+        fadeRafRef.current = requestAnimationFrame(step);
+        return;
+      }
+
+      fadeActiveRef.current = false;
+      fadeRafRef.current = null;
+      audio.pause();
+      audio.volume = getTargetVolume();
+    };
+
+    fadeRafRef.current = requestAnimationFrame(step);
+  }, [cancelFade, getTargetVolume]);
 
   // Asignar el audio global al ref cuando esté disponible (SOLO UNA VEZ)
   useEffect(() => {
@@ -153,6 +220,7 @@ export const useAudio = () => {
   // ============================
   const playTrack = async (track) => {
     try {
+      cancelFade();
       console.log("📀 Loading track:", track.id, track.title);
       console.log("🎚 Using quality:", quality);
 
@@ -302,6 +370,7 @@ export const useAudio = () => {
   useEffect(() => {
     const audio = audioRef.current || getAudioElement();
     if (audio) {
+      if (fadeActiveRef.current) return;
       audio.volume = isMuted ? 0 : volume;
     }
   }, [volume, isMuted]);
@@ -322,17 +391,30 @@ export const useAudio = () => {
   // ============================
   // 🔥 Play/Pause
   // ============================
-  const togglePlay = () => {
+  const playCurrent = useCallback(() => {
     const audio = audioRef.current || getAudioElement();
     if (!audio) return;
 
+    cancelFade();
+    audio.volume = isMuted ? 0 : volume;
+    audio.play().catch(console.error);
+    setIsPlaying(true);
+  }, [cancelFade, isMuted, volume]);
+
+  const pauseWithFade = useCallback(() => {
+    const audio = audioRef.current || getAudioElement();
+    if (!audio) return;
+
+    fadeOutAndPause(audio);
+    setIsPlaying(false);
+  }, [fadeOutAndPause]);
+
+  const togglePlay = () => {
     if (isPlaying) {
-      audio.pause();
-      setIsPlaying(false);
-    } else {
-      audio.play().catch(console.error);
-      setIsPlaying(true);
+      pauseWithFade();
+      return;
     }
+    playCurrent();
   };
 
 
@@ -384,6 +466,8 @@ export const useAudio = () => {
 
     // Funciones
     playTrack,
+    playCurrent,
+    pauseWithFade,
     togglePlay,
     handleSeek,
     handleVolumeChange,

@@ -12,7 +12,7 @@ import {
   Shuffle,
   FileText
 } from "lucide-react";
-import { getArtistName } from '../utils/helpers';
+import { getArtistName, getTrackDisplayTitle } from '../utils/helpers';
 import api from '../services/api';
 
 const Player = ({
@@ -261,6 +261,7 @@ const Player = ({
   const tidalCover = currentTrack.album?.cover
     ? `https://resources.tidal.com/images/${currentTrack.album.cover.replace(/-/g, "/")}/1280x1280.jpg`
     : currentTrack.cover || "";
+  const displayTitle = getTrackDisplayTitle(currentTrack);
 
   return (
     <>
@@ -314,7 +315,7 @@ const Player = ({
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-2xl font-bold mb-6 text-white">
-              🎤 Letras de <span style={{ color: accent }}>{currentTrack.title}</span>
+              🎤 Letras de <span style={{ color: accent }}>{displayTitle}</span>
             </h2>
 
             {lyricsStructured ? (
@@ -407,13 +408,13 @@ const Player = ({
         <div className="flex items-center gap-4 px-4 pt-3">
           <img
             src={tidalCover}
-            alt={currentTrack.title}
+            alt={displayTitle || currentTrack.title}
             className="w-16 h-16 rounded-lg shadow-lg"
             onError={(e) => (e.target.src = currentTrack.cover || "")}
           />
 
           <div className="flex-1 min-w-0">
-            <h3 className="font-semibold truncate">{currentTrack.title}</h3>
+            <h3 className="font-semibold truncate">{displayTitle}</h3>
             <p className="text-sm text-gray-400 truncate">
               {getArtistName(currentTrack)}
             </p>

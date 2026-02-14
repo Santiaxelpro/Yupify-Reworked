@@ -65,6 +65,20 @@ export const getCoverUrl = (track, size = 1280) => {
   return null;
 };
 
+/**
+ * Obtener tÃ­tulo con versiÃ³n si existe (ej: "Slowed")
+ */
+export const getTrackDisplayTitle = (track) => {
+  if (!track) return '';
+  const title = track.title || '';
+  const rawVersion = typeof track.version === 'string' ? track.version.trim() : '';
+  if (!rawVersion) return title;
+  const lowerTitle = title.toLowerCase();
+  const lowerVersion = rawVersion.toLowerCase();
+  if (lowerTitle.includes(lowerVersion)) return title;
+  return `${title} (${rawVersion})`;
+};
+
 
 
 /**
@@ -256,6 +270,7 @@ export default {
   formatDuration,
   formatPlays,
   getCoverUrl,
+  getTrackDisplayTitle,
   getArtistName,
   getAudioQuality,
   shuffleArray,

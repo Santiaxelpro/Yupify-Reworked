@@ -1,7 +1,7 @@
 // src/components/TrackList.jsx
 import React from 'react';
 import { Play, Heart, MoreVertical } from 'lucide-react';
-import { getCoverUrl, getArtistName } from '../utils/helpers';
+import { getCoverUrl, getArtistName, getTrackDisplayTitle } from '../utils/helpers';
 
 const TrackList = ({ tracks, onPlay, onToggleFavorite, favorites = [], currentTrackId }) => {
   
@@ -42,7 +42,7 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, favorites = [], currentTr
             </div>
             
             <div className="flex-1 min-w-0">
-              <h3 className="font-semibold truncate">{track.title}</h3>
+              <h3 className="font-semibold truncate">{getTrackDisplayTitle(track)}</h3>
               <p className="text-sm text-gray-400 truncate">{getArtistName(track)}</p>
               <span className="text-xs text-[#1db954]">
                 {track.audioQuality || track.quality || 'HI_RES'}

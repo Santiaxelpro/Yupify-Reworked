@@ -1,7 +1,7 @@
 // src/components/TrackCard.jsx
 import React from 'react';
 import { Play, Heart, MoreVertical } from 'lucide-react';
-import { getArtistName, getCoverUrl } from '../utils/helpers';
+import { getArtistName, getCoverUrl, getTrackDisplayTitle } from '../utils/helpers';
 
 const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
   
@@ -14,7 +14,7 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
       <div className="relative mb-3">
         <img
           src={getCover()}
-          alt={track.title}
+          alt={getTrackDisplayTitle(track) || track.title}
           className="w-full aspect-square object-cover rounded-lg"
           onError={(e) => e.target.src = 'https://resources.tidal.com/images/ddd75a35/5b2d/409c/abe3/7368b34f02f0/1280x1280.jpg'}
         />
@@ -36,7 +36,7 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
           </button>
         )}
       </div>
-      <h3 className="font-semibold truncate text-white">{track.title}</h3>
+      <h3 className="font-semibold truncate text-white">{getTrackDisplayTitle(track)}</h3>
       <p className="text-sm text-gray-400 truncate">{getArtistName(track)}</p>
       <div className="flex items-center justify-between mt-2">
         <span className="text-xs text-green-400 font-semibold">
