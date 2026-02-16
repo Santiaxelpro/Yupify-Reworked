@@ -6,7 +6,7 @@ import { getArtistName, getCoverUrl, getTrackDisplayTitle } from '../utils/helpe
 const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
   
   const getCover = () => {
-    return getCoverUrl(track, 1280) || track.cover || track.album?.cover || 'https://resources.tidal.com/images/5187b614/1c44/4694/9ab1/d675a3c41114/1280x1280.jpg';
+    return getCoverUrl(track, 1280) || 'https://resources.tidal.com/images/5187b614/1c44/4694/9ab1/d675a3c41114/1280x1280.jpg';
   };
 
   return (

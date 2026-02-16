@@ -240,6 +240,23 @@ export const exploreService = {
   }
 };
 
+// ==================== RECOMENDACIONES ====================
+
+export const recommendationsService = {
+  getRecommendations: async (trackId, limit = 20, offset = 0) => {
+    const params = new URLSearchParams({
+      id: trackId,
+      limit: String(limit),
+      offset: String(offset)
+    });
+    const response = await fetch(
+      `${API_URL}/api/recommendations?${params.toString()}`,
+      { headers: getHeaders() }
+    );
+    return handleResponse(response);
+  }
+};
+
 // ==================== PLAYLISTS ====================
 
 export const playlistService = {
@@ -473,6 +490,7 @@ export default {
   album: albumService,
   artist: artistService,
   explore: exploreService,
+  recommendations: recommendationsService,
   playlist: playlistService,
   favorite: favoriteService,
   history: historyService,

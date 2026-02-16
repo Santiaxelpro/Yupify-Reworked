@@ -501,12 +501,18 @@ const App = () => {
       if (albumTerm) searchPromises.push(api.search.searchAlbum(albumTerm, 20));
       if (useArtist && genreTerm) searchPromises.push(api.search.search(`${artistName} ${genreTerm}`, 20));
 
+      const recommendationsPromise = api.recommendations
+        .getRecommendations(currentId, 25, 0)
+        .catch(() => null);
+
       const searchResults = await Promise.allSettled(searchPromises);
+      const recommendationsResult = await recommendationsPromise;
       if (runId !== autoplayRunIdRef.current || currentTrack?.id !== currentId) return [];
 
       const searchItems = searchResults.flatMap(result => (
         result.status == 'fulfilled' ? (result.value?.items || []) : []
       ));
+      const recommendationsItems = recommendationsResult?.items || [];
 
       let trendingSource = trendingTracks;
       if (!Array.isArray(trendingSource) || trendingSource.length === 0) {
@@ -517,7 +523,7 @@ const App = () => {
       if (runId !== autoplayRunIdRef.current || currentTrack?.id !== currentId) return [];
 
       const candidates = buildCandidates({
-        sources: [searchItems, favorites, history, trendingSource],
+        sources: [recommendationsItems, searchItems, favorites, history, trendingSource],
         currentTrack: currentSnapshot,
         queue,
         playedIds: playedRef.current,

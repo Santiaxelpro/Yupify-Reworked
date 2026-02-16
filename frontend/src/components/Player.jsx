@@ -12,7 +12,7 @@ import {
   Shuffle,
   FileText
 } from "lucide-react";
-import { getArtistName, getTrackDisplayTitle } from '../utils/helpers';
+import { getArtistName, getTrackDisplayTitle, getCoverUrl } from '../utils/helpers';
 import api from '../services/api';
 
 const Player = ({
@@ -258,9 +258,8 @@ const Player = ({
 
   if (!currentTrack) return null;
 
-  const tidalCover = currentTrack.album?.cover
-    ? `https://resources.tidal.com/images/${currentTrack.album.cover.replace(/-/g, "/")}/1280x1280.jpg`
-    : currentTrack.cover || "";
+  const fallbackCover = 'https://resources.tidal.com/images/ddd75a35/5b2d/409c/abe3/7368b34f02f0/1280x1280.jpg';
+  const tidalCover = getCoverUrl(currentTrack, 1280) || fallbackCover;
   const displayTitle = getTrackDisplayTitle(currentTrack);
 
   return (
@@ -410,7 +409,7 @@ const Player = ({
             src={tidalCover}
             alt={displayTitle || currentTrack.title}
             className="w-16 h-16 rounded-lg shadow-lg"
-            onError={(e) => (e.target.src = currentTrack.cover || "")}
+            onError={(e) => (e.target.src = fallbackCover)}
           />
 
           <div className="flex-1 min-w-0">

@@ -55,10 +55,35 @@ export const getCoverUrl = (track, size = 1280) => {
     return track.cover;
   }
 
+  const normalizeCoverId = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('http')) return null;
+    if (trimmed.includes('/')) {
+      const clean = trimmed.replace(/^\//, '');
+      return /^[0-9a-fA-F/]{20,}$/.test(clean) ? clean : null;
+    }
+    if (/^[0-9a-fA-F-]{32,36}$/.test(trimmed)) {
+      return trimmed.replace(/-/g, "/");
+    }
+    return null;
+  };
+
+  const coverIdFromTrack = normalizeCoverId(track.cover);
+  if (coverIdFromTrack) {
+    return `https://resources.tidal.com/images/${coverIdFromTrack}/${size}x${size}.jpg`;
+  }
+
   // Si existe ID de portada de Tidal
   if (track.album?.cover) {
-    const coverId = track.album.cover.replace(/-/g, "/");
-    return `https://resources.tidal.com/images/${coverId}/${size}x${size}.jpg`;
+    if (track.album.cover.startsWith('http')) {
+      return track.album.cover;
+    }
+    const coverId = normalizeCoverId(track.album.cover);
+    if (coverId) {
+      return `https://resources.tidal.com/images/${coverId}/${size}x${size}.jpg`;
+    }
   }
 
   // Si no existe portada, se retorna null sin fallback

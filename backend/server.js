@@ -3,6 +3,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const jwt = require('jsonwebtoken');
 require('dotenv').config({ path: '/etc/secrets/.env' });
 
@@ -10,6 +12,36 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 // 🔥 Necesario para Render, Vercel, Cloudflare, Nginx, etc.
 app.set("trust proxy", 1);
+
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
+const axiosFast = axios.create({ httpAgent, httpsAgent });
+
+// Cache simple en memoria para search/track
+const CACHE_TTL = {
+  search: 60 * 1000,
+  track: 5 * 60 * 1000
+};
+const cacheStore = new Map();
+
+const getCache = (key) => {
+  const entry = cacheStore.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    cacheStore.delete(key);
+    return null;
+  }
+  return entry.value;
+};
+
+const setCache = (key, value, ttlMs) => {
+  cacheStore.set(key, { value, expiresAt: Date.now() + ttlMs });
+};
+const FAST_SEARCH_POOL = 4;
+const FAST_TRACK_POOL = 4;
+const SEARCH_TIMEOUT_MS = 4500;
+const TRACK_TIMEOUT_MS = 4500;
+
 
 // Cache simple en memoria para trending
 const TRENDING_TTL_MS = 15 * 60 * 1000;
@@ -97,8 +129,16 @@ async function getRandomAPI() {
       // Forzar https:// si no existe
       const fixed = clean.startsWith("http") ? clean : `https://${clean}`;
 
-      return axios.get(`${fixed}/health`, { timeout: 3000 })
-        .then(() => fixed)
+      return axios.get(`${fixed}`, { timeout: 3000 })
+        .then(resp => {
+          const data = resp?.data;
+          const version = data?.version;
+          const repo = data?.Repo || data?.repo || data?.repository;
+          if ((version === "2.4" || version === "2.2") && repo === "https://github.com/uimaxbai/hifi-api") {
+            return fixed;
+          }
+          return null;
+        })
         .catch(() => null);
     })
   );
@@ -108,7 +148,7 @@ async function getRandomAPI() {
   }
 
   if (healthy.length === 0) {
-    console.error("❌ No hay APIs HiFi disponibles");
+    console.error("No hay APIs HiFi disponibles");
     throw new Error("No hay APIs HiFi disponibles");
   }
 
@@ -169,6 +209,26 @@ async function searchAnyAPI(query, limit = 1) {
   return uniqueItems;
 }
 
+async function fetchRecommendationsFromAPIs(params) {
+  const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+  const requests = allAPIs.map(api =>
+    axios.get(`${api}/recommendations/?${params}`, { timeout: 10000 })
+      .then(r => ({ ok: true, api, data: r.data }))
+      .catch(e => ({ ok: false, api, error: e.message }))
+  );
+
+  const responses = await Promise.all(requests);
+  const success = responses.find(r => {
+    if (!r.ok || !r.data) return false;
+    const items = r.data?.data?.items ?? r.data?.items ?? r.data?.data;
+    return Array.isArray(items) && items.length > 0;
+  });
+  if (success) return success.data;
+
+  const fallback = responses.find(r => r.ok && r.data);
+  return fallback ? fallback.data : null;
+}
+
 function normalizeSeedKey(title, artist) {
   const t = (title || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
   const a = (artist || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -183,6 +243,47 @@ function shuffleArray(arr) {
   }
   return a;
 }
+async function fetchFirstSearchResult({ apis, searchQuery, limit, offset, timeoutMs = 4500 }) {
+  const requests = apis.map(api => (
+    axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: timeoutMs })
+      .then(r => {
+        const data = r.data || {};
+        const items = data?.data?.items ?? data?.items ?? [];
+        if (Array.isArray(items) && items.length > 0) {
+          return data;
+        }
+        return Promise.reject(new Error('No items'));
+      })
+  ));
+
+  try {
+    return await Promise.any(requests);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
+  const requests = apis.map(api => {
+    const cleanApi = api.replace(/\/+$/, "");
+    const url = `${cleanApi}/track/?id=${id}&quality=${quality}`;
+    return axiosFast.get(url, { timeout: timeoutMs })
+      .then(r => {
+        const data = r.data;
+        if (data && data.data && data.data.manifestMimeType && data.data.manifest) {
+          return { ok: true, url, data: data.data };
+        }
+        return Promise.reject(new Error('Invalid track'));
+      });
+  });
+
+  try {
+    return await Promise.any(requests);
+  } catch {
+    return null;
+  }
+}
+
 
 async function fetchDeezerSeeds() {
   try {
@@ -438,6 +539,12 @@ app.get('/api/track/:id', async (req, res) => {
 
     // Si no existe, usar LOSSLESS
     const requestedQuality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
+    const cacheKey = `track:${id}|q:${requestedQuality}`;
+
+    const cached = getCache(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
 
     console.log(`\n>>> Calidad solicitada: ${qRaw} → intentando: ${requestedQuality}`);
 
@@ -453,37 +560,24 @@ app.get('/api/track/:id', async (req, res) => {
 
     // Todas las APIs
     const allAPIs = Object.values(HIFI_APIS).flat();
+    const shuffledAPIs = shuffleArray(allAPIs);
+    const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
 
     // Intentar cada calidad en orden de fallback
     let success = null;
     let usedQuality = null;
 
     for (const quality of qualitiesToTry) {
-      console.log(`   → Intentando calidad: ${quality}`);
+      console.log(`   -> Intentando calidad: ${quality}`);
 
-      // Crear requests para esta calidad
-      const requests = allAPIs.map(api => {
-        const cleanApi = api.replace(/\/+$/, "");
-        const url = `${cleanApi}/track/?id=${id}&quality=${quality}`;
-        return axios.get(url, { timeout: 6000 })
-          .then(r => ({ ok: true, url, data: r.data }))
-          .catch(e => ({ ok: false, url, error: e.message }));
-      });
-
-      const results = await Promise.all(requests);
-
-      // Buscar respuesta válida
-      success = results.find(r =>
-        r.ok &&
-        r.data &&
-        r.data.data &&
-        r.data.data.manifestMimeType &&
-        r.data.data.manifest
-      );
+      success = await fetchFirstTrackData({ apis: fastAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
+      if (!success) {
+        success = await fetchFirstTrackData({ apis: allAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
+      }
 
       if (success) {
         usedQuality = quality;
-        console.log(`✔️ Track encontrado en calidad: ${quality}`);
+        console.log(`OK Track encontrado en calidad: ${quality}`);
         break;
       }
     }
@@ -500,7 +594,7 @@ app.get('/api/track/:id', async (req, res) => {
 
     // Devolver la data real
       // Decodificar manifest si viene en base64
-      const respData = { ...success.data.data };
+      const respData = { ...success.data };
 
       function tryDecodeManifest(m) {
         if (!m || typeof m !== 'string') return null;
@@ -551,11 +645,13 @@ app.get('/api/track/:id', async (req, res) => {
         // No modificar: el frontend necesita el manifest completo
       }
 
-      res.json({
+      const payload = {
         ...respData,
         requestedQuality: requestedQuality,
         usedQuality: usedQuality
-      });
+      };
+      setCache(cacheKey, payload, CACHE_TTL.track);
+      return res.json(payload);
 
   } catch (error) {
     console.error("❌ Error en TRACK:", error.message);
@@ -582,6 +678,7 @@ app.get('/api/search', async (req, res) => {
 
     if (!searchQuery) {
       return res.status(400).json({ error: 'Falta parámetro de búsqueda (q/s/a/al)' });
+
     }
 
     // Si se especifica SEARCH_API en env, usar solo esa URL
@@ -589,28 +686,44 @@ app.get('/api/search', async (req, res) => {
       ? process.env.SEARCH_API.replace(/\/+$/, '')
       : null;
 
+    const cacheKey = `search:${searchQuery}|li:${limit}|offset:${offset}`;
+    const cached = getCache(cacheKey);
+    if (cached) return res.json(cached);
+
     if (envSearch) {
       const url = `${envSearch}/search/?${searchQuery}&li=${limit}&offset=${offset}`;
-      console.log('→ Search via SEARCH_API:', url);
-      const response = await axios.get(url, { timeout: 10000 });
+      console.log('-> Search via SEARCH_API:', url);
+      const response = await axiosFast.get(url, { timeout: SEARCH_TIMEOUT_MS });
       const remote = response.data || {};
 
+      let payload = null;
       if (remote.data && Array.isArray(remote.data.items)) {
-        return res.json({ version: remote.version || '2.4', data: { limit: remote.data.limit ?? Number(limit), offset: (remote.data.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.data.totalNumberOfItems ?? (remote.data.total ?? 0), items: remote.data.items } });
+        payload = { version: remote.version || '2.4', data: { limit: remote.data.limit ?? Number(limit), offset: (remote.data.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.data.totalNumberOfItems ?? (remote.data.total ?? 0), items: remote.data.items } };
+      } else if (Array.isArray(remote.items)) {
+        payload = { version: remote.version || '2.4', data: { limit: remote.limit ?? Number(limit), offset: (remote.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.total ?? remote.totalNumberOfItems ?? remote.items.length, items: remote.items } };
+      } else {
+        payload = { version: remote.version || '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: 0, items: [] } };
       }
 
-      if (Array.isArray(remote.items)) {
-        return res.json({ version: remote.version || '2.4', data: { limit: remote.limit ?? Number(limit), offset: (remote.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.total ?? remote.totalNumberOfItems ?? remote.items.length, items: remote.items } });
-      }
-
-      return res.json({ version: remote.version || '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: 0, items: [] } });
+      setCache(cacheKey, payload, CACHE_TTL.search);
+      return res.json(payload);
     }
 
     // Por defecto: consultar todas las APIs listadas en HIFI_APIS en paralelo
     const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
 
+    const shuffledAPIs = shuffleArray(allAPIs);
+    const fastAPIs = shuffledAPIs.slice(0, FAST_SEARCH_POOL);
+    const fastRemote = await fetchFirstSearchResult({ apis: fastAPIs, searchQuery, limit, offset, timeoutMs: SEARCH_TIMEOUT_MS });
+    if (fastRemote) {
+      const items = fastRemote?.data?.items ?? fastRemote?.items ?? [];
+      const payload = { version: fastRemote.version || '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: items.length, items } };
+      setCache(cacheKey, payload, CACHE_TTL.search);
+      return res.json(payload);
+    }
+
     const requests = allAPIs.map(api =>
-      axios.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: 10000 })
+      axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
         .then(r => ({ ok: true, api, data: r.data }))
         .catch(e => ({ ok: false, api, error: e.message }))
     );
@@ -622,7 +735,9 @@ app.get('/api/search', async (req, res) => {
 
     if (success) {
       const remote = success.data;
-      return res.json({ version: remote.version || '2.4', data: { limit: remote.data.limit ?? Number(limit), offset: (remote.data.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.data.totalNumberOfItems ?? ((remote.data.total ?? remote.data.items.length) || 0), items: remote.data.items } });
+      const payload = { version: remote.version || '2.4', data: { limit: remote.data.limit ?? Number(limit), offset: (remote.data.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.data.totalNumberOfItems ?? ((remote.data.total ?? remote.data.items.length) || 0), items: remote.data.items } };
+      setCache(cacheKey, payload, CACHE_TTL.search);
+      return res.json(payload);
     }
 
     // Si no hay una respuesta clara, intentar combinar items desde todas las respuestas válidas
@@ -640,11 +755,61 @@ app.get('/api/search', async (req, res) => {
       }
     }
 
-    return res.json({ version: '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: uniqueItems.length, items: uniqueItems } });
+    const payload = { version: '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: uniqueItems.length, items: uniqueItems } };
+    setCache(cacheKey, payload, CACHE_TTL.search);
+    return res.json(payload);
     } catch (error) {
       console.error('Error en búsqueda (combinada):', error?.message || error);
       return res.status(500).json({ error: 'Error al buscar', details: error?.message || String(error) });
     }
+});
+
+// Recomendaciones por track
+app.get('/api/recommendations', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) {
+      return res.status(400).json({ error: 'Falta parÃ¡metro id' });
+    }
+
+    const params = new URLSearchParams(req.query);
+    if (req.query.limit && !req.query.li) {
+      params.set('li', req.query.limit);
+    }
+    if (req.query.li && !req.query.limit) {
+      params.set('limit', req.query.li);
+    }
+
+    const remote = await fetchRecommendationsFromAPIs(params.toString());
+    if (!remote) {
+      return res.json({ version: '2.4', data: { limit: 0, offset: 0, totalNumberOfItems: 0, items: [] } });
+    }
+
+    const items = remote?.data?.items ?? remote?.items ?? remote?.data ?? [];
+    if (Array.isArray(items)) {
+      const normalizedItems = items.map(item => {
+        if (item && item.id == null && item.trackId != null) {
+          return { ...item, id: item.trackId };
+        }
+        return item;
+      });
+
+      return res.json({
+        version: remote?.version || '2.4',
+        data: {
+          limit: Number(req.query.limit ?? req.query.li) || items.length,
+          offset: Number(req.query.offset) || 0,
+          totalNumberOfItems: normalizedItems.length,
+          items: normalizedItems
+        }
+      });
+    }
+
+    return res.json(remote);
+  } catch (error) {
+    console.error('Error en recomendaciones:', error?.message || error);
+    return res.status(500).json({ error: 'Error al obtener recomendaciones' });
+  }
 });
 
 // Obtener álbum
@@ -716,21 +881,67 @@ app.get('/api/lyrics', async (req, res) => {
       });
     }
 
-    const params = new URLSearchParams({
-      title: finalTitle,
-      artist,
-      album: album || "",
-      duration: duration || "",
-      source: source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word"
-    });
+    const buildArtistVariants = (raw) => {
+      const base = (raw || '').toString().trim();
+      if (!base) return [];
+      const variants = [base];
+      if (base.includes(',') && !base.includes('&')) {
+        const parts = base.split(',').map(p => p.trim()).filter(Boolean);
+        if (parts.length >= 2) {
+          const last = parts[parts.length - 1];
+          const head = parts.slice(0, -1).join(', ');
+          variants.push(`${head} & ${last}`);
+          variants.push(parts.join(' & '));
+        }
+      }
+      return Array.from(new Set(variants));
+    };
 
-    const url = `https://lyricsplus.prjktla.workers.dev/v2/lyrics/get?${params}`;
+    const artistVariants = buildArtistVariants(artist);
+    const albumVariants = album ? [album] : ["", finalTitle];
+    const durationVariants = duration ? [duration] : [""];
+    const baseSource = source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word";
 
-    console.log("→ Lyrics API:", url);
+    const paramsVariants = [];
+    const seenParams = new Set();
+    for (const art of artistVariants) {
+      for (const alb of albumVariants) {
+        for (const dur of durationVariants) {
+          const paramsObj = {
+            title: finalTitle,
+            artist: art,
+            album: alb || "",
+            duration: dur || "",
+            source: baseSource
+          };
+          const key = JSON.stringify(paramsObj);
+          if (seenParams.has(key)) continue;
+          seenParams.add(key);
+          paramsVariants.push(paramsObj);
+        }
+      }
+    }
 
-    const response = await axios.get(url, { timeout: 15000 });
+    const lyricsSources = [
+      'https://lyricsplus.binimum.org/v2/lyrics/get',
+      'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get'
+    ];
 
-    res.json(response.data);
+    let lastError = null;
+    for (const baseUrl of lyricsSources) {
+      for (const paramsObj of paramsVariants) {
+        const url = `${baseUrl}?${new URLSearchParams(paramsObj)}`;
+        console.log("-> Lyrics API:", url);
+        try {
+          const response = await axios.get(url, { timeout: 15000 });
+          return res.json(response.data);
+        } catch (err) {
+          lastError = err;
+        }
+      }
+    }
+
+    throw lastError || new Error('Lyrics API failed');
 
   } catch (error) {
     console.error("Error en /api/lyrics:", error.message);
@@ -1132,7 +1343,7 @@ app.get('/', (req, res) => {
     description: 'Backend proxy para Yupify - Streaming de música de alta calidad',
     endpoints: {
       auth: ['/api/auth/register', '/api/auth/login'],
-      music: ['/api/search', '/api/track/:id', '/api/album/:id', '/api/artist/:id'],
+      music: ['/api/search', '/api/recommendations', '/api/track/:id', '/api/album/:id', '/api/artist/:id'],
       user: ['/api/user/playlists', '/api/user/favorites', '/api/user/history', '/api/user/stats'],
       proxy: ['/api/dash/:id', '/api/lyrics/:id', '/api/cover', '/api/home', '/api/mix/:id']
     }
