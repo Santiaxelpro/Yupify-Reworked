@@ -20,7 +20,25 @@ const getAudioElement = () => {
 
 // Cargar Shaka Player si es necesario
 const initShakaPlayer = async (audioElement) => {
-  if (shakaPlayer) return shakaPlayer;
+  const ensureAttach = async (player) => {
+    if (!audioElement || typeof player.attach !== 'function') return;
+    try {
+      const currentEl = typeof player.getMediaElement === 'function' ? player.getMediaElement() : null;
+      if (currentEl && currentEl !== audioElement && typeof player.detach === 'function') {
+        await player.detach();
+      }
+      if (currentEl !== audioElement) {
+        await player.attach(audioElement);
+      }
+    } catch (e) {
+      console.warn('Shaka attach warning:', e);
+    }
+  };
+
+  if (shakaPlayer) {
+    await ensureAttach(shakaPlayer);
+    return shakaPlayer;
+  }
   
   return new Promise((resolve) => {
     if (!window.shaka) {
@@ -32,13 +50,10 @@ const initShakaPlayer = async (audioElement) => {
           window.shaka.polyfill?.installAll?.();
           // Crear Player sin mediaElement (attach() es la forma recomendada)
           const player = new window.shaka.Player();
-          if (audioElement && typeof player.attach === 'function') {
-            try {
-              await player.attach(audioElement);
-            } catch (e) {
-              console.warn('Shaka attach warning:', e);
-            }
-          }
+          player.addEventListener?.('error', (event) => {
+            console.error('Shaka player error:', event?.detail || event);
+          });
+          await ensureAttach(player);
           shakaPlayer = player;
           resolve(shakaPlayer);
         }
@@ -46,11 +61,18 @@ const initShakaPlayer = async (audioElement) => {
       document.head.appendChild(script);
     } else {
       const player = new window.shaka.Player();
-      if (audioElement && typeof player.attach === 'function') {
-        player.attach(audioElement).catch(e => console.warn('Shaka attach warning:', e));
-      }
-      shakaPlayer = player;
-      resolve(shakaPlayer);
+      player.addEventListener?.('error', (event) => {
+        console.error('Shaka player error:', event?.detail || event);
+      });
+      ensureAttach(player)
+        .then(() => {
+          shakaPlayer = player;
+          resolve(shakaPlayer);
+        })
+        .catch(() => {
+          shakaPlayer = player;
+          resolve(shakaPlayer);
+        });
     }
   });
 };
@@ -257,20 +279,19 @@ export const useAudio = () => {
               console.warn('Shaka unload warning:', e);
             }
           }
-          if (audioElement) {
-            audioElement.pause();
-            audioElement.removeAttribute('src');
-            audioElement.load();
+          if (typeof trackData.manifest !== 'string') {
+            throw new Error('Manifest DASH inv?lido');
           }
-          
-          // Crear Data URL del manifest DASH (evita HEAD requests en blobs)
-          const manifestBase64 = btoa(trackData.manifest);
-          const manifestUrl = 'data:application/dash+xml;base64,' + manifestBase64;
-          
 
-          
-          // Cargar manifest DASH con Shaka Player
-          await player.load(manifestUrl);
+          const manifestBlob = new Blob([trackData.manifest], { type: 'application/dash+xml' });
+          const manifestUrl = URL.createObjectURL(manifestBlob);
+
+          try {
+            // Cargar manifest DASH con Shaka Player
+            await player.load(manifestUrl);
+          } finally {
+            URL.revokeObjectURL(manifestUrl);
+          }
 
           
           setCurrentTrack({ ...track, isDash: true, manifest: trackData.manifest });
@@ -303,17 +324,32 @@ export const useAudio = () => {
           console.error("❌ Error en DASH playback:", error);
           // Fallback a LOSSLESS
 
-          const fallbackData = await api.track.getTrack(track.id, 'LOSSLESS');
-          if (fallbackData?.url) {
-            const trackWithUrl = { ...track, streamUrl: fallbackData.url, isDash: false };
-            setCurrentTrack(trackWithUrl);
-            setStreamUrl(fallbackData.url);
-            
-            if (audioElement) {
-              audioElement.src = fallbackData.url;
-              await audioElement.load();
-              audioElement.play().catch(console.error);
-              setIsPlaying(true);
+          const fallbackQualities = ['LOSSLESS', 'HIGH', 'LOW'];
+          for (const q of fallbackQualities) {
+            try {
+              const fallbackData = await api.track.getTrack(track.id, q);
+              if (fallbackData?.url) {
+                if (shakaPlayer && typeof shakaPlayer.detach === 'function') {
+                  try {
+                    await shakaPlayer.detach();
+                  } catch (e) {
+                    console.warn('Shaka detach warning:', e);
+                  }
+                }
+                const trackWithUrl = { ...track, streamUrl: fallbackData.url, isDash: false };
+                setCurrentTrack(trackWithUrl);
+                setStreamUrl(fallbackData.url);
+                
+                if (audioElement) {
+                  audioElement.src = fallbackData.url;
+                  audioElement.load();
+                  audioElement.play().catch(console.error);
+                  setIsPlaying(true);
+                }
+                break;
+              }
+            } catch (e) {
+              // probar siguiente calidad
             }
           }
         }
@@ -329,6 +365,15 @@ export const useAudio = () => {
 
 
         
+        // Detach Shaka before standard playback
+        if (shakaPlayer && typeof shakaPlayer.detach === 'function') {
+          try {
+            await shakaPlayer.detach();
+          } catch (e) {
+            console.warn('Shaka detach warning:', e);
+          }
+        }
+
         // Actualizar currentTrack CON la URL extraída
         const trackWithUrl = { ...track, streamUrl: realUrl, isDash: false };
         setCurrentTrack(trackWithUrl);

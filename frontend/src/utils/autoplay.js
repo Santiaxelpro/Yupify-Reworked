@@ -2,18 +2,22 @@
 import { getArtistName } from './helpers';
 
 const WEIGHTS = {
-  similarity: 0.55,
-  affinity: 0.2,
-  trending: 0.1,
-  popularity: 0.15,
-  sameArtist: 1.0,
-  sameAlbum: 0.3,
-  sameGenre: 0.8,
+  similarity: 0.5,
+  affinity: 0.3,
+  trending: 0.05,
+  popularity: 0.05,
+  sameArtist: 0.9,
+  sameAlbum: 0.25,
+  sameGenre: 0.75,
   titleOverlap: 0.1,
   durationMatch: 0.05,
-  favoriteBoost: 0.5,
-  historyBoost: 0.3,
-  trendingBoost: 0.2
+  favoriteBoost: 0.6,
+  historyBoost: 0.5,
+  trendingBoost: 0.12,
+  genreBoost: 0.35,
+  crossGenrePenalty: 0.5,
+  unknownGenrePenalty: 0.25,
+  skipPenalty: 0.7
 };
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
@@ -187,6 +191,8 @@ const getAffinitySignals = (candidateInfo, context) => {
   const favoriteKeys = context?.favoriteKeys;
   const historyIndexById = context?.historyIndexById;
   const historyIndexByKey = context?.historyIndexByKey;
+  const historyById = context?.historyById;
+  const historyByKey = context?.historyByKey;
   const historyLength = context?.historyLength || 0;
 
   const id = candidateInfo.track?.id;
@@ -195,6 +201,7 @@ const getAffinitySignals = (candidateInfo, context) => {
   const isFavorite = (id != null && favoriteIds?.has(id)) || (key && favoriteKeys?.has(key));
 
   let historyWeight = 0;
+  let historyEntry = null;
   if (historyLength > 0) {
     let index = id != null ? historyIndexById?.get(id) : undefined;
     if (index == null && key) {
@@ -204,17 +211,45 @@ const getAffinitySignals = (candidateInfo, context) => {
       const denom = Math.max(1, historyLength - 1);
       historyWeight = 1 - (index / denom);
     }
+
+    if (historyById && id != null && historyById.has(id)) {
+      historyEntry = historyById.get(id);
+    } else if (historyByKey && key && historyByKey.has(key)) {
+      historyEntry = historyByKey.get(key);
+    }
   }
+
+  let listenRatio = 1;
+  if (historyEntry) {
+    const ratio = Number(historyEntry.listenRatio);
+    if (Number.isFinite(ratio)) {
+      listenRatio = clamp(ratio, 0, 1);
+    } else {
+      const listenSeconds = Number(historyEntry.listenSeconds);
+      const duration = Number(historyEntry.duration);
+      if (Number.isFinite(listenSeconds) && Number.isFinite(duration) && duration > 0) {
+        listenRatio = clamp(listenSeconds / duration, 0, 1);
+      }
+    }
+  }
+
+  const skipped = Boolean(historyEntry?.skipped);
+  const skipPenalty = skipped
+    ? WEIGHTS.skipPenalty * Math.max(0.35, 1 - listenRatio) * (0.6 + historyWeight * 0.4)
+    : 0;
 
   const affinityScore = clamp(
     (isFavorite ? WEIGHTS.favoriteBoost : 0)
-      + (historyWeight * WEIGHTS.historyBoost)
+      + (historyWeight * WEIGHTS.historyBoost * listenRatio)
   );
 
   return {
     isFavorite,
     historyWeight,
-    affinityScore
+    affinityScore,
+    listenRatio,
+    skipped,
+    skipPenalty
   };
 };
 
@@ -243,18 +278,31 @@ const scoreTrackInfo = (candidateInfo, context, currentInfo) => {
   const trendingIds = context?.trendingIds;
   const maxPlays = context?.maxPlays || 0;
   const id = candidateInfo.track?.id;
-  const { affinityScore } = getAffinitySignals(candidateInfo, context);
+  const { affinityScore, skipPenalty } = getAffinitySignals(candidateInfo, context);
 
   const isTrending = id != null && trendingIds?.has(id);
-  const trendingScore = clamp(isTrending ? WEIGHTS.trendingBoost : 0);
+  const trendingScore = sameGenre ? clamp(isTrending ? WEIGHTS.trendingBoost : 0) : 0;
 
   const plays = toNumber(candidateInfo.track?.plays);
-  const popularityScore = maxPlays > 0 ? clamp(plays / maxPlays) : 0;
+  const popularityScore = sameGenre && maxPlays > 0 ? clamp(plays / maxPlays) : 0;
+
+  let genreScore = 0;
+  if (currentInfo.genreKey) {
+    if (sameGenre) {
+      genreScore = WEIGHTS.genreBoost;
+    } else if (candidateInfo.genreKey) {
+      genreScore = -WEIGHTS.crossGenrePenalty;
+    } else if (!sameArtist) {
+      genreScore = -WEIGHTS.unknownGenrePenalty;
+    }
+  }
 
   return (similarityScore * WEIGHTS.similarity)
     + (affinityScore * WEIGHTS.affinity)
     + (trendingScore * WEIGHTS.trending)
-    + (popularityScore * WEIGHTS.popularity);
+    + (popularityScore * WEIGHTS.popularity)
+    + genreScore
+    - skipPenalty;
 };
 
 export const scoreTrack = (candidate, context) => {
@@ -294,7 +342,21 @@ export const rankWithMMR = (candidates, context, limit = 20, lambda = 0.7) => {
   const minRelated = Number.isFinite(context?.minRelated)
     ? Math.max(0, context.minRelated)
     : Math.min(12, limit);
-  const scored = candidates
+  const minSameGenreCandidates = Number.isFinite(context?.minSameGenreCandidates)
+    ? Math.max(0, context.minSameGenreCandidates)
+    : 8;
+
+  let candidatePool = candidates;
+  if (currentInfo?.genreKey) {
+    const sameGenreCandidates = candidates.filter((track) => (
+      getGenreKey(track) === currentInfo.genreKey
+    ));
+    if (sameGenreCandidates.length >= minSameGenreCandidates) {
+      candidatePool = sameGenreCandidates;
+    }
+  }
+
+  const scored = candidatePool
     .map((track) => {
       const info = buildTrackInfo(track);
       const jitter = jitterScale > 0 ? (random() - 0.5) * jitterScale : 0;
@@ -386,8 +448,6 @@ export const buildCandidates = ({
   );
 
   const recentArtistSet = new Set(recentArtists.filter(Boolean));
-  const currentGenreBucket = getGenreBucket(currentTrack);
-  const currentArtistKey = getArtistKey(currentTrack);
 
   const shouldReplace = (incoming, existing) => {
     const incomingPlays = toNumber(incoming?.plays);
@@ -439,16 +499,6 @@ export const buildCandidates = ({
 
     const artistKey = getArtistKey(track);
     if (artistKey && recentArtistSet.has(artistKey)) return;
-
-    if (currentGenreBucket) {
-      const candidateGenre = getGenreBucket(track);
-      const sameArtist = artistKey && artistKey === currentArtistKey;
-      if (candidateGenre) {
-        if (candidateGenre !== currentGenreBucket) return;
-      } else if (!sameArtist) {
-        return;
-      }
-    }
 
     byKey.set(key, track);
   };

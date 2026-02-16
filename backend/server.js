@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
-require('dotenv').config();
+require('dotenv').config({ path: '/etc/secrets/.env' });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1088,8 +1088,14 @@ app.get('/api/user/stats', authMiddleware, (req, res) => {
       .slice(0, 10)
       .map(([artist, count]) => ({ artist, plays: count }));
 
-    // Calcular tiempo total de escucha
-    const totalMinutes = Math.floor(history.reduce((sum, track) => sum + (track.duration || 0), 0) / 60);
+    // Calcular tiempo total de escucha (preferir listenSeconds si existe)
+    const totalSeconds = history.reduce((sum, track) => {
+      const seconds = Number.isFinite(track?.listenSeconds)
+        ? track.listenSeconds
+        : (track?.duration || 0);
+      return sum + (seconds || 0);
+    }, 0);
+    const totalMinutes = Math.floor(totalSeconds / 60);
 
     const stats = {
       totalPlaylists: playlists.length,

@@ -17,7 +17,7 @@ import Navigation from './components/Navigation';
 
 // Services
 import api from './services/api';
-import { getArtistName } from './utils/helpers';
+import { getArtistName, getLocalStorage, setLocalStorage } from './utils/helpers';
 import {
   buildCandidates,
   rankWithMMR,
@@ -26,6 +26,12 @@ import {
   getAlbumTerm,
   getTrackKey
 } from './utils/autoplay';
+
+const GUEST_HISTORY_KEY = 'yupify_guest_history';
+const MAX_HISTORY_ITEMS = 100;
+const SKIP_RATIO_THRESHOLD = 0.35;
+const SKIP_SECONDS_THRESHOLD = 30;
+const MIN_SAME_GENRE_CANDIDATES = 8;
 
 const App = () => {
   // Audio hook
@@ -91,6 +97,17 @@ const App = () => {
   const trendingOffsetRef = useRef(0);
   const trendingLoadingRef = useRef(false);
   const trendingHasMoreRef = useRef(true);
+  const playbackRef = useRef(null);
+  const currentTimeRef = useRef(0);
+  const durationRef = useRef(0);
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
+  useEffect(() => {
+    durationRef.current = duration;
+  }, [duration]);
 
   // Cargar datos al iniciar
   useEffect(() => {
@@ -98,6 +115,8 @@ const App = () => {
     loadTrending(true);
     if (isAuthenticated) {
       loadUserData();
+    } else {
+      loadGuestHistory();
     }
   }, [isAuthenticated]);
 
@@ -181,12 +200,32 @@ const App = () => {
         api.history.getHistory(50)
       ]);
       
-      setMyPlaylists(playlistsData.playlists || []);
-      setFavorites(favoritesData.favorites || []);
-      setHistory(historyData.history || []);
+      setMyPlaylists(playlistsData.playlists || playlistsData.raw?.playlists || playlistsData.items || []);
+      setFavorites(favoritesData.favorites || favoritesData.raw?.favorites || favoritesData.items || []);
+      setHistory(historyData.history || historyData.raw?.history || historyData.items || []);
     } catch (err) {
       console.error('Error cargando datos:', err);
     }
+  };
+
+  const loadGuestHistory = () => {
+    const stored = getLocalStorage(GUEST_HISTORY_KEY, []);
+    if (Array.isArray(stored)) {
+      setHistory(stored);
+    } else {
+      setHistory([]);
+    }
+  };
+
+  const appendHistoryEntry = (entry, persistToLocal = false) => {
+    if (!entry) return;
+    setHistory(prev => {
+      const next = [entry, ...prev].slice(0, MAX_HISTORY_ITEMS);
+      if (persistToLocal) {
+        setLocalStorage(GUEST_HISTORY_KEY, next);
+      }
+      return next;
+    });
   };
 
   // Búsqueda
@@ -204,11 +243,75 @@ const App = () => {
     }
   };
 
+  const recordPlayback = async ({ skipReason = null, endedNaturally = false } = {}) => {
+    const state = playbackRef.current;
+    if (!state?.track || state.recorded) return;
+
+    const track = state.track;
+    const listenSecondsRaw = Number.isFinite(currentTimeRef.current) ? currentTimeRef.current : 0;
+    const durationValue = Number.isFinite(durationRef.current) && durationRef.current > 0
+      ? durationRef.current
+      : (Number.isFinite(track?.duration) ? track.duration : 0);
+    const listenSeconds = durationValue > 0
+      ? Math.min(listenSecondsRaw, durationValue)
+      : listenSecondsRaw;
+    const listenRatio = durationValue > 0 ? Math.min(1, listenSeconds / durationValue) : null;
+
+    const manualSkip = Boolean(skipReason);
+    const autoSkip = listenSeconds < SKIP_SECONDS_THRESHOLD
+      || (listenRatio != null && listenRatio < SKIP_RATIO_THRESHOLD);
+
+    const skipped = endedNaturally ? false : (manualSkip || autoSkip);
+    const finalSkipReason = manualSkip ? skipReason : (skipped ? 'short_listen' : null);
+
+    const entry = {
+      id: track.id,
+      title: track.title,
+      artist: getArtistName(track),
+      cover: track.album?.cover || track.cover,
+      duration: track.duration,
+      listenSeconds,
+      listenRatio,
+      skipped,
+      skipReason: finalSkipReason,
+      source: state.source || 'manual',
+      endedNaturally: endedNaturally && !skipped,
+      playedAt: new Date().toISOString()
+    };
+
+    playbackRef.current = { ...state, recorded: true };
+
+    if (track?.id != null && isAuthenticated) {
+      try {
+        await api.history.addToHistory(track.id, entry);
+      } catch (err) {
+        console.error('Error guardando historial:', err);
+      }
+    }
+
+    appendHistoryEntry(entry, !isAuthenticated);
+  };
+
+
   // Reproducir track
-  const handlePlayTrack = async (track) => {
+  const handlePlayTrack = async (track, options = {}) => {
+    const { source = null, action = 'manual_select' } = options || {};
+    const resolvedSource = source || (activeTab === 'search' ? 'search' : 'manual');
+    const prev = playbackRef.current;
+    if (prev?.track && prev.track?.id !== track?.id && !prev.recorded) {
+      void recordPlayback({ skipReason: action, endedNaturally: false });
+    }
+
+    playbackRef.current = {
+      track,
+      source: resolvedSource,
+      startedAt: Date.now(),
+      recorded: false
+    };
+
     playTrack(track);
-    
-    // Agregar a cola si no está
+
+    // Agregar a cola si no est??
     if (track?.id != null) {
       playedRef.current.add(track.id);
     }
@@ -224,20 +327,6 @@ const App = () => {
         ? [...prev, track]
         : prev
     );
-    
-    // Agregar al historial si está autenticado
-    if (isAuthenticated) {
-      try {
-        await api.history.addToHistory(track.id, {
-          title: track.title,
-          artist: getArtistName(track),
-          cover: track.album?.cover || track.cover,
-          duration: track.duration
-        });
-      } catch (err) {
-        console.error('Error agregando al historial:', err);
-      }
-    }
   };
 
   // Favoritos
@@ -345,14 +434,23 @@ const App = () => {
 
     const historyIndexById = new Map();
     const historyIndexByKey = new Map();
+    const historyById = new Map();
+    const historyByKey = new Map();
+
     history.forEach((track, index) => {
       if (!track) return;
       if (track.id != null && !historyIndexById.has(track.id)) {
         historyIndexById.set(track.id, index);
       }
+      if (track.id != null && !historyById.has(track.id)) {
+        historyById.set(track.id, track);
+      }
       const key = getTrackKey(track);
       if (key && !historyIndexByKey.has(key)) {
         historyIndexByKey.set(key, index);
+      }
+      if (key && !historyByKey.has(key)) {
+        historyByKey.set(key, track);
       }
     });
 
@@ -368,13 +466,16 @@ const App = () => {
       favoriteKeys,
       historyIndexById,
       historyIndexByKey,
+      historyById,
+      historyByKey,
       historyLength: history.length,
       trendingIds,
       maxPlays,
       sessionSeed: sessionSeedRef.current,
       sessionJitter: 0.03,
       relatednessFloor: 0.12,
-      minRelated: 10
+      minRelated: 10,
+      minSameGenreCandidates: MIN_SAME_GENRE_CANDIDATES
     };
   };
 
@@ -464,14 +565,14 @@ const App = () => {
     try {
       const nextFromQueue = getNextTrackFromQueue();
       if (nextFromQueue) {
-        handlePlayTrack(nextFromQueue);
+        handlePlayTrack(nextFromQueue, { source: 'queue', action: 'autoplay_next' });
         return;
       }
 
       const autoplayTracks = await fetchAutoplayTracks();
       if (autoplayTracks.length > 0) {
         appendToQueue(autoplayTracks);
-        handlePlayTrack(autoplayTracks[0]);
+        handlePlayTrack(autoplayTracks[0], { source: 'autoplay', action: 'autoplay_next' });
       }
     } finally {
       autoNextInFlightRef.current = false;
@@ -485,6 +586,7 @@ const App = () => {
   useEffect(() => {
     if (!setOnEndedCallback) return;
     setOnEndedCallback(() => {
+      recordPlayback({ endedNaturally: true });
       if (autoNextRef.current) {
         autoNextRef.current();
       }
@@ -494,13 +596,15 @@ const App = () => {
 
   // Navegación
   const handleSkipNext = () => {
+    recordPlayback({ skipReason: 'manual_next', endedNaturally: false });
     handleAutoNext();
   };
 
   const handleSkipPrevious = () => {
     const currentIndex = queue.findIndex(t => t.id === currentTrack?.id);
     if (currentIndex > 0) {
-      handlePlayTrack(queue[currentIndex - 1]);
+      recordPlayback({ skipReason: 'manual_prev', endedNaturally: false });
+      handlePlayTrack(queue[currentIndex - 1], { source: 'queue', action: 'manual_prev' });
     }
   };
 
@@ -541,7 +645,7 @@ const App = () => {
     logout();
     setMyPlaylists([]);
     setFavorites([]);
-    setHistory([]);
+    loadGuestHistory();
     setShowUserMenu(false);
   };
 
