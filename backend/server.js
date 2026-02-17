@@ -111,6 +111,11 @@ const HIFI_APIS = {
     'https://virginia.monochrome.tf',
     'https://oregon.monochrome.tf',
     'https://california.monochrome.tf',
+    'https://eu-central.monochrome.tf',
+    'https://us-west.monochrome.tf',
+    'https://arran.monochrome.tf',
+    'https://api.monochrome.tf',
+    'https://monochrome-api.samidy.com',
     'https://frankfurt.monochrome.tf',
     'https://london.monochrome.tf',
     'https://singapore.monochrome.tf',
@@ -134,6 +139,11 @@ const HIFI_APIS = {
   ],
   primary: [
     'https://hifi.401658.xyz'
+  ],
+  community: [
+    'https://tidal-api.binimum.org',
+    'https://hifi-one.spotisaver.net',
+    'https://hifi-two.spotisaver.net'
   ],
   kinoplus: [
     'https://tidal.kinoplus.online/'
@@ -1074,8 +1084,13 @@ app.get('/api/lyrics', async (req, res) => {
       return Array.from(new Set(variants));
     };
 
-    const artistVariants = buildArtistVariants(artist);
-    const albumVariants = album ? [album] : [finalTitle, ""];
+    let artistVariants = buildArtistVariants(artist);
+    artistVariants = artistVariants.sort((a, b) => {
+      const aScore = a.includes('&') ? 0 : 1;
+      const bScore = b.includes('&') ? 0 : 1;
+      return aScore - bScore;
+    });
+    const albumVariants = album ? [album] : ["", finalTitle];
     const durationVariants = duration ? [duration] : [""];
     const baseSource = source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word";
 
@@ -1115,7 +1130,17 @@ app.get('/api/lyrics', async (req, res) => {
         console.log("-> Lyrics API:", url);
         try {
           const response = await axios.get(url, { timeout: 15000 });
-          const payload = response.data;
+          let payload = response.data;
+          if (typeof payload === 'string') {
+            const trimmed = payload.trim();
+            if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+              try {
+                payload = JSON.parse(trimmed);
+              } catch (e) {
+                // keep as string if parse fails
+              }
+            }
+          }
           const hasLyricsPayload = (obj) => {
             if (!obj) return false;
             if (typeof obj === 'string') return obj.trim().length > 0;
