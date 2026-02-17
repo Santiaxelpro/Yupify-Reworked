@@ -7,8 +7,9 @@ const http = require('http');
 const https = require('https');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
+const path = require('path');
 require('dotenv').config({ path: '/etc/secrets/.env' });
-require('dotenv').config();
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1891,6 +1892,7 @@ app.listen(PORT, () => {
   console.log(`📡 APIs disponibles: ${Object.keys(HIFI_APIS).join(', ')}`);
   console.log(`🔒 Autenticación: JWT`);
   console.log(`💾 Base de datos: ${pool ? 'PostgreSQL' : 'En memoria (usar PostgreSQL/MongoDB en producción)'}`);
+  console.log(`🧩 DATABASE_URL presente: ${Boolean(process.env.DATABASE_URL)}`);
 });
 
 module.exports = app;
