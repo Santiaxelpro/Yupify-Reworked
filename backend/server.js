@@ -5,8 +5,10 @@ const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const http = require('http');
 const https = require('https');
+const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 require('dotenv').config({ path: '/etc/secrets/.env' });
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,6 +18,25 @@ app.set("trust proxy", 1);
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 const axiosFast = axios.create({ httpAgent, httpsAgent });
+
+const USE_POSTGRES = Boolean(process.env.DATABASE_URL);
+let pool = null;
+
+if (USE_POSTGRES) {
+  const pgConfig = {
+    connectionString: process.env.DATABASE_URL
+  };
+
+  const needsSSL = process.env.PGSSL === 'true'
+    || process.env.NODE_ENV === 'production'
+    || (process.env.DATABASE_URL || '').includes('render.com');
+
+  if (needsSSL) {
+    pgConfig.ssl = { rejectUnauthorized: false };
+  }
+
+  pool = new Pool(pgConfig);
+}
 
 // Cache simple en memoria para search/track
 const CACHE_TTL = {
@@ -382,7 +403,7 @@ async function forward(req, res, endpoint) {
   }
 }
 
-// Base de datos en memoria (en producción usar PostgreSQL/MongoDB)
+// Base de datos en memoria (fallback si no hay PostgreSQL)
 const db = {
   users: new Map(),
   playlists: new Map(),
@@ -390,6 +411,79 @@ const db = {
   history: new Map(),
   sessions: new Map()
 };
+
+const toIso = (value) => {
+  if (!value) return null;
+  try {
+    return new Date(value).toISOString();
+  } catch {
+    return null;
+  }
+};
+
+const parseJsonValue = (value, fallback) => {
+  if (value == null) return fallback;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return value;
+};
+
+async function initDb() {
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      name TEXT NOT NULL,
+      plan TEXT NOT NULL DEFAULT 'free',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS playlists (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      is_public BOOLEAN NOT NULL DEFAULT TRUE,
+      tracks JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS favorites (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      track_id TEXT NOT NULL,
+      track_data JSONB NOT NULL,
+      added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, track_id)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS history (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      track_id TEXT NOT NULL,
+      track_data JSONB NOT NULL,
+      played_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists(user_id);');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id);');
+}
 
 // Middleware de autenticación
 const authMiddleware = (req, res, next) => {
@@ -408,6 +502,16 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
+if (pool) {
+  initDb()
+    .then(() => {
+      console.log('PostgreSQL listo');
+    })
+    .catch(err => {
+      console.error('Error inicializando PostgreSQL:', err.message);
+    });
+}
+
 // ==================== RUTAS DE AUTENTICACIÓN ====================
 
 // Registro
@@ -419,7 +523,45 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Todos los campos son requeridos' });
     }
 
-    // Verificar si el usuario ya existe
+    if (pool) {
+      const exists = await pool.query('SELECT 1 FROM users WHERE email = $1', [email]);
+      if (exists.rowCount > 0) {
+        return res.status(409).json({ error: 'El usuario ya existe' });
+      }
+
+      const userId = `user_${Date.now()}`;
+      const user = {
+        id: userId,
+        email,
+        password,
+        name,
+        createdAt: new Date().toISOString(),
+        plan: 'free'
+      };
+
+      await pool.query(
+        'INSERT INTO users (id, email, password, name, plan, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
+        [user.id, user.email, user.password, user.name, user.plan, user.createdAt]
+      );
+
+      res.status(201).json({
+        token: jwt.sign(
+          { userId: user.id, email: user.email },
+          process.env.JWT_SECRET || 'yupify_secret_key',
+          { expiresIn: '7d' }
+        ),
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          plan: user.plan
+        }
+      });
+
+      return;
+    }
+
+    // Verificar si el usuario ya existe (memoria)
     if (db.users.has(email)) {
       return res.status(409).json({ error: 'El usuario ya existe' });
     }
@@ -469,6 +611,34 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email y contraseña requeridos' });
+    }
+
+    if (pool) {
+      const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+      if (result.rowCount === 0) {
+        return res.status(401).json({ error: 'Credenciales inválidas' });
+      }
+      const user = result.rows[0];
+
+      if (password !== user.password) {
+        return res.status(401).json({ error: 'Credenciales inválidas' });
+      }
+
+      const token = jwt.sign(
+        { userId: user.id, email: user.email },
+        process.env.JWT_SECRET || 'yupify_secret_key',
+        { expiresIn: '7d' }
+      );
+
+      return res.json({
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          plan: user.plan || 'free'
+        }
+      });
     }
 
     const user = db.users.get(email);
@@ -868,87 +1038,6 @@ app.get('/api/playlist/:id', async (req, res) => {
   }
 });
 
-// ==================== LETRAS (LYRICSPLUS API) ====================
-app.get('/api/lyrics', async (req, res) => {
-  try {
-    // Aceptar 'track' como alias para 'title'
-    const { title, track, artist, album, duration, source } = req.query;
-    const finalTitle = title || track;
-
-    if (!finalTitle || !artist) {
-      return res.status(400).json({
-        error: "Faltan parámetros obligatorios: title (o track) y artist"
-      });
-    }
-
-    const buildArtistVariants = (raw) => {
-      const base = (raw || '').toString().trim();
-      if (!base) return [];
-      const variants = [base];
-      if (base.includes(',') && !base.includes('&')) {
-        const parts = base.split(',').map(p => p.trim()).filter(Boolean);
-        if (parts.length >= 2) {
-          const last = parts[parts.length - 1];
-          const head = parts.slice(0, -1).join(', ');
-          variants.push(`${head} & ${last}`);
-          variants.push(parts.join(' & '));
-        }
-      }
-      return Array.from(new Set(variants));
-    };
-
-    const artistVariants = buildArtistVariants(artist);
-    const albumVariants = album ? [album] : ["", finalTitle];
-    const durationVariants = duration ? [duration] : [""];
-    const baseSource = source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word";
-
-    const paramsVariants = [];
-    const seenParams = new Set();
-    for (const art of artistVariants) {
-      for (const alb of albumVariants) {
-        for (const dur of durationVariants) {
-          const paramsObj = {
-            title: finalTitle,
-            artist: art,
-            album: alb || "",
-            duration: dur || "",
-            source: baseSource
-          };
-          const key = JSON.stringify(paramsObj);
-          if (seenParams.has(key)) continue;
-          seenParams.add(key);
-          paramsVariants.push(paramsObj);
-        }
-      }
-    }
-
-    const lyricsSources = [
-      'https://lyricsplus.binimum.org/v2/lyrics/get',
-      'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get'
-    ];
-
-    let lastError = null;
-    for (const baseUrl of lyricsSources) {
-      for (const paramsObj of paramsVariants) {
-        const url = `${baseUrl}?${new URLSearchParams(paramsObj)}`;
-        console.log("-> Lyrics API:", url);
-        try {
-          const response = await axios.get(url, { timeout: 15000 });
-          return res.json(response.data);
-        } catch (err) {
-          lastError = err;
-        }
-      }
-    }
-
-    throw lastError || new Error('Lyrics API failed');
-
-  } catch (error) {
-    console.error("Error en /api/lyrics:", error.message);
-    res.status(500).json({ error: "Error obteniendo letras" });
-  }
-});
-
 
 // Obtener portada
 app.get('/api/cover', async (req, res) => {
@@ -1048,6 +1137,30 @@ app.get('/api/mix/:id', async (req, res) => {
 // Obtener playlists del usuario
 app.get('/api/user/playlists', authMiddleware, (req, res) => {
   try {
+    if (pool) {
+      pool.query(
+        'SELECT id, name, description, is_public, tracks, created_at, updated_at FROM playlists WHERE user_id = $1 ORDER BY created_at DESC',
+        [req.userId]
+      )
+        .then(result => {
+          const playlists = result.rows.map(row => ({
+            id: row.id,
+            name: row.name,
+            description: row.description || '',
+            isPublic: row.is_public,
+            tracks: parseJsonValue(row.tracks, []),
+            createdAt: toIso(row.created_at),
+            updatedAt: toIso(row.updated_at)
+          }));
+          res.json({ playlists });
+        })
+        .catch(err => {
+          console.error('Error al obtener playlists:', err);
+          res.status(500).json({ error: 'Error al obtener playlists' });
+        });
+      return;
+    }
+
     const playlists = db.playlists.get(req.userId) || [];
     res.json({ playlists });
   } catch (error) {
@@ -1057,7 +1170,7 @@ app.get('/api/user/playlists', authMiddleware, (req, res) => {
 });
 
 // Crear playlist
-app.post('/api/user/playlists', authMiddleware, (req, res) => {
+app.post('/api/user/playlists', authMiddleware, async (req, res) => {
   try {
     const { name, description, isPublic = true } = req.body;
 
@@ -1066,15 +1179,24 @@ app.post('/api/user/playlists', authMiddleware, (req, res) => {
     }
 
     const playlistId = `playlist_${Date.now()}`;
+    const now = new Date().toISOString();
     const playlist = {
       id: playlistId,
       name,
       description: description || '',
       isPublic,
       tracks: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt: now,
+      updatedAt: now
     };
+
+    if (pool) {
+      await pool.query(
+        'INSERT INTO playlists (id, user_id, name, description, is_public, tracks, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)',
+        [playlist.id, req.userId, playlist.name, playlist.description, playlist.isPublic, JSON.stringify(playlist.tracks), playlist.createdAt, playlist.updatedAt]
+      );
+      return res.status(201).json({ playlist });
+    }
 
     const userPlaylists = db.playlists.get(req.userId) || [];
     userPlaylists.push(playlist);
@@ -1088,13 +1210,52 @@ app.post('/api/user/playlists', authMiddleware, (req, res) => {
 });
 
 // Agregar track a playlist
-app.post('/api/user/playlists/:playlistId/tracks', authMiddleware, (req, res) => {
+app.post('/api/user/playlists/:playlistId/tracks', authMiddleware, async (req, res) => {
   try {
     const { playlistId } = req.params;
     const { trackId, trackData } = req.body;
 
     if (!trackId || !trackData) {
       return res.status(400).json({ error: 'trackId y trackData requeridos' });
+    }
+
+    if (pool) {
+      const result = await pool.query(
+        'SELECT id, name, description, is_public, tracks, created_at, updated_at FROM playlists WHERE id = $1 AND user_id = $2',
+        [playlistId, req.userId]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ error: 'Playlist no encontrada' });
+      }
+      const row = result.rows[0];
+      const tracks = parseJsonValue(row.tracks, []);
+      const trackKey = String(trackId);
+
+      if (!tracks.some(t => String(t.id) === trackKey)) {
+        tracks.push({
+          id: trackId,
+          ...trackData,
+          addedAt: new Date().toISOString()
+        });
+      }
+
+      const updatedAt = new Date().toISOString();
+      await pool.query(
+        'UPDATE playlists SET tracks = $1::jsonb, updated_at = $2 WHERE id = $3 AND user_id = $4',
+        [JSON.stringify(tracks), updatedAt, playlistId, req.userId]
+      );
+
+      return res.json({
+        playlist: {
+          id: row.id,
+          name: row.name,
+          description: row.description || '',
+          isPublic: row.is_public,
+          tracks,
+          createdAt: toIso(row.created_at),
+          updatedAt
+        }
+      });
     }
 
     const userPlaylists = db.playlists.get(req.userId) || [];
@@ -1105,7 +1266,7 @@ app.post('/api/user/playlists/:playlistId/tracks', authMiddleware, (req, res) =>
     }
 
     // Verificar si el track ya está en la playlist
-    if (!playlist.tracks.some(t => t.id === trackId)) {
+    if (!playlist.tracks.some(t => String(t.id) === String(trackId))) {
       playlist.tracks.push({
         id: trackId,
         ...trackData,
@@ -1123,9 +1284,39 @@ app.post('/api/user/playlists/:playlistId/tracks', authMiddleware, (req, res) =>
 });
 
 // Eliminar track de playlist
-app.delete('/api/user/playlists/:playlistId/tracks/:trackId', authMiddleware, (req, res) => {
+app.delete('/api/user/playlists/:playlistId/tracks/:trackId', authMiddleware, async (req, res) => {
   try {
     const { playlistId, trackId } = req.params;
+
+    if (pool) {
+      const result = await pool.query(
+        'SELECT id, name, description, is_public, tracks, created_at, updated_at FROM playlists WHERE id = $1 AND user_id = $2',
+        [playlistId, req.userId]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ error: 'Playlist no encontrada' });
+      }
+      const row = result.rows[0];
+      const tracks = parseJsonValue(row.tracks, []).filter(t => String(t.id) !== String(trackId));
+      const updatedAt = new Date().toISOString();
+
+      await pool.query(
+        'UPDATE playlists SET tracks = $1::jsonb, updated_at = $2 WHERE id = $3 AND user_id = $4',
+        [JSON.stringify(tracks), updatedAt, playlistId, req.userId]
+      );
+
+      return res.json({
+        playlist: {
+          id: row.id,
+          name: row.name,
+          description: row.description || '',
+          isPublic: row.is_public,
+          tracks,
+          createdAt: toIso(row.created_at),
+          updatedAt
+        }
+      });
+    }
 
     const userPlaylists = db.playlists.get(req.userId) || [];
     const playlist = userPlaylists.find(p => p.id === playlistId);
@@ -1134,7 +1325,7 @@ app.delete('/api/user/playlists/:playlistId/tracks/:trackId', authMiddleware, (r
       return res.status(404).json({ error: 'Playlist no encontrada' });
     }
 
-    playlist.tracks = playlist.tracks.filter(t => t.id !== parseInt(trackId));
+    playlist.tracks = playlist.tracks.filter(t => String(t.id) !== String(trackId));
     playlist.updatedAt = new Date().toISOString();
     db.playlists.set(req.userId, userPlaylists);
 
@@ -1146,9 +1337,20 @@ app.delete('/api/user/playlists/:playlistId/tracks/:trackId', authMiddleware, (r
 });
 
 // Eliminar playlist
-app.delete('/api/user/playlists/:playlistId', authMiddleware, (req, res) => {
+app.delete('/api/user/playlists/:playlistId', authMiddleware, async (req, res) => {
   try {
     const { playlistId } = req.params;
+
+    if (pool) {
+      const result = await pool.query(
+        'DELETE FROM playlists WHERE id = $1 AND user_id = $2',
+        [playlistId, req.userId]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ error: 'Playlist no encontrada' });
+      }
+      return res.json({ message: 'Playlist eliminada' });
+    }
 
     const userPlaylists = db.playlists.get(req.userId) || [];
     const filteredPlaylists = userPlaylists.filter(p => p.id !== playlistId);
@@ -1170,6 +1372,26 @@ app.delete('/api/user/playlists/:playlistId', authMiddleware, (req, res) => {
 // Obtener favoritos
 app.get('/api/user/favorites', authMiddleware, (req, res) => {
   try {
+    if (pool) {
+      pool.query(
+        'SELECT track_id, track_data, added_at FROM favorites WHERE user_id = $1 ORDER BY added_at DESC',
+        [req.userId]
+      )
+        .then(result => {
+          const favorites = result.rows.map(row => ({
+            id: row.track_id,
+            ...parseJsonValue(row.track_data, {}),
+            addedAt: toIso(row.added_at)
+          }));
+          res.json({ favorites });
+        })
+        .catch(err => {
+          console.error('Error al obtener favoritos:', err);
+          res.status(500).json({ error: 'Error al obtener favoritos' });
+        });
+      return;
+    }
+
     const favorites = db.favorites.get(req.userId) || [];
     res.json({ favorites });
   } catch (error) {
@@ -1179,7 +1401,7 @@ app.get('/api/user/favorites', authMiddleware, (req, res) => {
 });
 
 // Agregar a favoritos
-app.post('/api/user/favorites', authMiddleware, (req, res) => {
+app.post('/api/user/favorites', authMiddleware, async (req, res) => {
   try {
     const { trackId, trackData } = req.body;
 
@@ -1187,10 +1409,29 @@ app.post('/api/user/favorites', authMiddleware, (req, res) => {
       return res.status(400).json({ error: 'trackId y trackData requeridos' });
     }
 
+    if (pool) {
+      const now = new Date().toISOString();
+      await pool.query(
+        'INSERT INTO favorites (user_id, track_id, track_data, added_at) VALUES ($1, $2, $3::jsonb, $4) ON CONFLICT (user_id, track_id) DO NOTHING',
+        [req.userId, String(trackId), JSON.stringify(trackData), now]
+      );
+
+      const result = await pool.query(
+        'SELECT track_id, track_data, added_at FROM favorites WHERE user_id = $1 ORDER BY added_at DESC',
+        [req.userId]
+      );
+      const favorites = result.rows.map(row => ({
+        id: row.track_id,
+        ...parseJsonValue(row.track_data, {}),
+        addedAt: toIso(row.added_at)
+      }));
+      return res.json({ favorites });
+    }
+
     const favorites = db.favorites.get(req.userId) || [];
     
     // Verificar si ya está en favoritos
-    if (!favorites.some(f => f.id === trackId)) {
+    if (!favorites.some(f => String(f.id) === String(trackId))) {
       favorites.push({
         id: trackId,
         ...trackData,
@@ -1207,12 +1448,31 @@ app.post('/api/user/favorites', authMiddleware, (req, res) => {
 });
 
 // Eliminar de favoritos
-app.delete('/api/user/favorites/:trackId', authMiddleware, (req, res) => {
+app.delete('/api/user/favorites/:trackId', authMiddleware, async (req, res) => {
   try {
     const { trackId } = req.params;
 
+    if (pool) {
+      await pool.query(
+        'DELETE FROM favorites WHERE user_id = $1 AND track_id = $2',
+        [req.userId, String(trackId)]
+      );
+
+      const result = await pool.query(
+        'SELECT track_id, track_data, added_at FROM favorites WHERE user_id = $1 ORDER BY added_at DESC',
+        [req.userId]
+      );
+      const favorites = result.rows.map(row => ({
+        id: row.track_id,
+        ...parseJsonValue(row.track_data, {}),
+        addedAt: toIso(row.added_at)
+      }));
+
+      return res.json({ favorites });
+    }
+
     const favorites = db.favorites.get(req.userId) || [];
-    const filtered = favorites.filter(f => f.id !== parseInt(trackId));
+    const filtered = favorites.filter(f => String(f.id) !== String(trackId));
     db.favorites.set(req.userId, filtered);
 
     res.json({ favorites: filtered });
@@ -1228,7 +1488,29 @@ app.delete('/api/user/favorites/:trackId', authMiddleware, (req, res) => {
 app.get('/api/user/history', authMiddleware, (req, res) => {
   try {
     const { limit = 50 } = req.query;
-    const history = (db.history.get(req.userId) || []).slice(0, parseInt(limit));
+    const safeLimit = Math.min(parseInt(limit, 10) || 50, 200);
+
+    if (pool) {
+      pool.query(
+        'SELECT track_id, track_data, played_at FROM history WHERE user_id = $1 ORDER BY played_at DESC LIMIT $2',
+        [req.userId, safeLimit]
+      )
+        .then(result => {
+          const history = result.rows.map(row => ({
+            id: row.track_id,
+            ...parseJsonValue(row.track_data, {}),
+            playedAt: toIso(row.played_at)
+          }));
+          res.json({ history });
+        })
+        .catch(err => {
+          console.error('Error al obtener historial:', err);
+          res.status(500).json({ error: 'Error al obtener historial' });
+        });
+      return;
+    }
+
+    const history = (db.history.get(req.userId) || []).slice(0, safeLimit);
     res.json({ history });
   } catch (error) {
     console.error('Error al obtener historial:', error);
@@ -1237,12 +1519,35 @@ app.get('/api/user/history', authMiddleware, (req, res) => {
 });
 
 // Agregar al historial
-app.post('/api/user/history', authMiddleware, (req, res) => {
+app.post('/api/user/history', authMiddleware, async (req, res) => {
   try {
     const { trackId, trackData } = req.body;
 
     if (!trackId || !trackData) {
       return res.status(400).json({ error: 'trackId y trackData requeridos' });
+    }
+
+    if (pool) {
+      const playedAt = trackData.playedAt ? new Date(trackData.playedAt).toISOString() : new Date().toISOString();
+      await pool.query(
+        'INSERT INTO history (user_id, track_id, track_data, played_at) VALUES ($1, $2, $3::jsonb, $4)',
+        [req.userId, String(trackId), JSON.stringify(trackData), playedAt]
+      );
+
+      await pool.query(
+        `
+        DELETE FROM history
+        WHERE id IN (
+          SELECT id FROM history
+          WHERE user_id = $1
+          ORDER BY played_at DESC
+          OFFSET 100
+        )
+        `,
+        [req.userId]
+      );
+
+      return res.json({ message: 'Agregado al historial' });
     }
 
     const history = db.history.get(req.userId) || [];
@@ -1268,8 +1573,13 @@ app.post('/api/user/history', authMiddleware, (req, res) => {
 });
 
 // Limpiar historial
-app.delete('/api/user/history', authMiddleware, (req, res) => {
+app.delete('/api/user/history', authMiddleware, async (req, res) => {
   try {
+    if (pool) {
+      await pool.query('DELETE FROM history WHERE user_id = $1', [req.userId]);
+      return res.json({ message: 'Historial limpiado' });
+    }
+
     db.history.set(req.userId, []);
     res.json({ message: 'Historial limpiado' });
   } catch (error) {
@@ -1283,6 +1593,57 @@ app.delete('/api/user/history', authMiddleware, (req, res) => {
 // Obtener estadísticas del usuario
 app.get('/api/user/stats', authMiddleware, (req, res) => {
   try {
+    if (pool) {
+      Promise.all([
+        pool.query('SELECT COUNT(*) FROM playlists WHERE user_id = $1', [req.userId]),
+        pool.query('SELECT COUNT(*) FROM favorites WHERE user_id = $1', [req.userId]),
+        pool.query('SELECT COUNT(*) FROM history WHERE user_id = $1', [req.userId]),
+        pool.query('SELECT track_id, track_data, played_at FROM history WHERE user_id = $1 ORDER BY played_at DESC LIMIT 100', [req.userId])
+      ])
+        .then(([playlistsCount, favoritesCount, historyCount, historyResult]) => {
+          const history = historyResult.rows.map(row => ({
+            id: row.track_id,
+            ...parseJsonValue(row.track_data, {}),
+            playedAt: toIso(row.played_at)
+          }));
+
+          const artistCounts = {};
+          history.forEach(track => {
+            const artist = track.artist || 'Unknown';
+            artistCounts[artist] = (artistCounts[artist] || 0) + 1;
+          });
+
+          const topArtists = Object.entries(artistCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([artist, count]) => ({ artist, plays: count }));
+
+          const totalSeconds = history.reduce((sum, track) => {
+            const seconds = Number.isFinite(track?.listenSeconds)
+              ? track.listenSeconds
+              : (track?.duration || 0);
+            return sum + (seconds || 0);
+          }, 0);
+          const totalMinutes = Math.floor(totalSeconds / 60);
+
+          const stats = {
+            totalPlaylists: Number(playlistsCount.rows[0]?.count || 0),
+            totalFavorites: Number(favoritesCount.rows[0]?.count || 0),
+            totalPlays: Number(historyCount.rows[0]?.count || 0),
+            totalMinutes,
+            topArtists,
+            recentlyPlayed: history.slice(0, 10)
+          };
+
+          res.json(stats);
+        })
+        .catch(err => {
+          console.error('Error al obtener estadísticas:', err);
+          res.status(500).json({ error: 'Error al obtener estadísticas' });
+        });
+      return;
+    }
+
     const playlists = db.playlists.get(req.userId) || [];
     const favorites = db.favorites.get(req.userId) || [];
     const history = db.history.get(req.userId) || [];
@@ -1326,13 +1687,28 @@ app.get('/api/user/stats', authMiddleware, (req, res) => {
 
 // ==================== HEALTH CHECK ====================
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    apis: Object.keys(HIFI_APIS),
-    users: db.users.size
-  });
+app.get('/health', async (req, res) => {
+  try {
+    let usersCount = db.users.size;
+    if (pool) {
+      const result = await pool.query('SELECT COUNT(*) FROM users');
+      usersCount = Number(result.rows[0]?.count || 0);
+    }
+
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      apis: Object.keys(HIFI_APIS),
+      users: usersCount
+    });
+  } catch (error) {
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      apis: Object.keys(HIFI_APIS),
+      users: db.users.size
+    });
+  }
 });
 
 // Ruta raíz
@@ -1345,7 +1721,7 @@ app.get('/', (req, res) => {
       auth: ['/api/auth/register', '/api/auth/login'],
       music: ['/api/search', '/api/recommendations', '/api/track/:id', '/api/album/:id', '/api/artist/:id'],
       user: ['/api/user/playlists', '/api/user/favorites', '/api/user/history', '/api/user/stats'],
-      proxy: ['/api/dash/:id', '/api/lyrics/:id', '/api/cover', '/api/home', '/api/mix/:id']
+      proxy: ['/api/dash/:id', '/api/cover', '/api/home', '/api/mix/:id']
     }
   });
 });
@@ -1364,7 +1740,7 @@ app.listen(PORT, () => {
   console.log(`🎵 Yupify Backend iniciado en http://localhost:${PORT}`);
   console.log(`📡 APIs disponibles: ${Object.keys(HIFI_APIS).join(', ')}`);
   console.log(`🔒 Autenticación: JWT`);
-  console.log(`💾 Base de datos: En memoria (usar PostgreSQL/MongoDB en producción)`);
+  console.log(`💾 Base de datos: ${pool ? 'PostgreSQL' : 'En memoria (usar PostgreSQL/MongoDB en producción)'}`);
 });
 
 module.exports = app;

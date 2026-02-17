@@ -13,7 +13,6 @@ import {
   FileText
 } from "lucide-react";
 import { getArtistName, getTrackDisplayTitle, getCoverUrl } from '../utils/helpers';
-import api from '../services/api';
 
 const Player = ({
   currentTrack = null,
@@ -48,15 +47,28 @@ const Player = ({
   const accent = '#1db954';
   const accentSoft = 'rgba(29,185,84,0.4)';
   const accentBg = 'rgba(29,185,84,0.08)';
+  const amLyricsRef = React.useRef(null);
+  const [amLyricsReady, setAmLyricsReady] = useState(false);
+  const [amLyricsError, setAmLyricsError] = useState(false);
+  const amLyricsScriptId = 'am-lyrics-loader';
+  const amLyricsSrc = 'https://cdn.jsdelivr.net/npm/@uimaxbai/am-lyrics@0.5.0/dist/src/am-lyrics.min.js';
   // ----------------------
   // 🔥 LYRICS MODAL
   // ----------------------
   const [lyricsOpen, setLyricsOpen] = useState(false);
-  const [lyricsContent, setLyricsContent] = useState("Cargando...");
   const [lyricsStructured, setLyricsStructured] = useState(null);
   const linesRef = React.useRef([]);
   const [activeLineIndex, setActiveLineIndex] = React.useState(-1);
   const [activeSyllableIndex, setActiveSyllableIndex] = React.useState(-1);
+
+  const currentTimeMs = Number.isFinite(currentTime) ? Math.max(0, Math.round(currentTime * 1000)) : 0;
+  const durationMs = Number.isFinite(duration) && duration > 0
+    ? Math.round(duration * 1000)
+    : (Number.isFinite(currentTrack?.duration) ? Math.round(currentTrack.duration * 1000) : undefined);
+  const lyricsTitle = currentTrack?.title || '';
+  const lyricsArtist = currentTrack ? getArtistName(currentTrack) : '';
+  const lyricsAlbum = currentTrack?.album?.title || '';
+  const lyricsQuery = [lyricsTitle, lyricsArtist].filter(Boolean).join(' ');
 
   const toMs = (t) => {
     if (t == null) return 0;
@@ -212,10 +224,65 @@ const Player = ({
 
   React.useEffect(() => {
     if (!lyricsOpen || !preloadedLyrics) return;
-    const { structured, text } = normalizeLyricsPayload(preloadedLyrics);
+    const { structured } = normalizeLyricsPayload(preloadedLyrics);
     setLyricsStructured(structured);
-    setLyricsContent(text || '');
   }, [lyricsOpen, preloadedLyrics]);
+
+  React.useEffect(() => {
+    if (!lyricsOpen) return;
+
+    if (window.customElements?.get('am-lyrics')) {
+      setAmLyricsReady(true);
+      setAmLyricsError(false);
+      return;
+    }
+
+    const existing = document.getElementById(amLyricsScriptId);
+    if (existing) {
+      const check = setInterval(() => {
+        if (window.customElements?.get('am-lyrics')) {
+          setAmLyricsReady(true);
+          setAmLyricsError(false);
+          clearInterval(check);
+        }
+      }, 200);
+      return () => clearInterval(check);
+    }
+
+    const script = document.createElement('script');
+    script.id = amLyricsScriptId;
+    script.type = 'module';
+    script.src = amLyricsSrc;
+    script.onload = () => {
+      setAmLyricsReady(true);
+      setAmLyricsError(false);
+    };
+    script.onerror = () => {
+      setAmLyricsError(true);
+      setAmLyricsReady(false);
+    };
+    document.head.appendChild(script);
+  }, [lyricsOpen]);
+
+  React.useEffect(() => {
+    if (!lyricsOpen || !amLyricsReady) return;
+    const el = amLyricsRef.current;
+    if (!el) return;
+
+    const handleLineClick = (event) => {
+      const timestamp = event?.detail?.timestamp;
+      if (!Number.isFinite(timestamp)) return;
+      const audio = document.getElementById('yupify-audio-player');
+      if (!audio) return;
+      audio.currentTime = Math.max(0, timestamp / 1000);
+      audio.play();
+    };
+
+    el.addEventListener('line-click', handleLineClick);
+    return () => {
+      el.removeEventListener('line-click', handleLineClick);
+    };
+  }, [lyricsOpen, amLyricsReady]);
 
   // Click handler para seek a una sílaba
   const handleSyllableClick = React.useCallback((syllableTime) => {
@@ -226,26 +293,9 @@ const Player = ({
     }
   }, []);
 
-  const openLyrics = async () => {
+  const openLyrics = () => {
     if (!currentTrack) return;
-
     setLyricsOpen(true);
-    setLyricsContent("Cargando letras...");
-
-    try {
-      let payload = preloadedLyrics;
-      let parsed = normalizeLyricsPayload(payload);
-
-      if (!payload || (!parsed.structured && (!parsed.text || parsed.text === "No se encontraron letras."))) {
-        payload = await api.track.getLyrics(currentTrack.title, getArtistName(currentTrack));
-        parsed = normalizeLyricsPayload(payload);
-      }
-
-      setLyricsStructured(parsed.structured);
-      setLyricsContent(parsed.text || '');
-    } catch (err) {
-      setLyricsContent("Error al obtener letras.");
-    }
   };
 
   // ----------------------
@@ -301,6 +351,26 @@ const Player = ({
           background: ${accent};
           border-radius: 999px;
         }
+
+        .am-lyrics-wrapper {
+          background: radial-gradient(circle at 20% 10%, rgba(29,185,84,0.18), transparent 45%),
+            radial-gradient(circle at 80% 0%, rgba(59,130,246,0.18), transparent 45%),
+            #0b0b0b;
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 18px;
+          padding: 14px;
+          height: min(70vh, 700px);
+          overflow: hidden;
+        }
+
+        am-lyrics {
+          display: block;
+          height: 100%;
+          width: 100%;
+          --am-lyrics-highlight-color: #ffffff;
+          --hover-background-color: rgba(255,255,255,0.08);
+          --highlight-color: #ffffff;
+        }
       `}</style>
       {/* 🎤 Modal de Letras */}
       {lyricsOpen && (
@@ -317,9 +387,27 @@ const Player = ({
               🎤 Letras de <span style={{ color: accent }}>{displayTitle}</span>
             </h2>
 
-            {lyricsStructured ? (
+            {amLyricsReady && !amLyricsError ? (
+              <div className="am-lyrics-wrapper">
+                <am-lyrics
+                  ref={amLyricsRef}
+                  song-title={lyricsTitle}
+                  song-artist={lyricsArtist}
+                  song-album={lyricsAlbum}
+                  song-duration={durationMs ?? ''}
+                  query={lyricsQuery}
+                  current-time={currentTimeMs}
+                  duration={durationMs ?? ''}
+                  highlight-color="#ffffff"
+                  hover-background-color="rgba(255,255,255,0.08)"
+                  font-family="'SF Pro Display','SF Pro Text',Inter,system-ui,sans-serif"
+                  autoscroll
+                  interpolate
+                ></am-lyrics>
+              </div>
+            ) : (
               <div className="lyrics-container text-gray-100 leading-relaxed space-y-4 flex-1 overflow-y-auto pr-2">
-                {lyricsStructured.map((line, li) => {
+                {lyricsStructured && lyricsStructured.map((line, li) => {
                   const isActiveLine = li === activeLineIndex;
                   const hasSyllabus = line.syllabus && line.syllabus.length > 0;
                   return (
@@ -364,10 +452,6 @@ const Player = ({
                   );
                 })}
               </div>
-            ) : (
-              <pre className="whitespace-pre-wrap text-gray-300 leading-relaxed flex-1 overflow-y-auto">
-                {lyricsContent}
-              </pre>
             )}
 
             <button
