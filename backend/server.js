@@ -8,8 +8,16 @@ const https = require('https');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-require('dotenv').config({ path: '/etc/secrets/.env' });
-require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+const fs = require('fs');
+const dotenv = require('dotenv');
+
+const secretsEnvPath = '/etc/secrets/.env';
+const localEnvPath = path.resolve(__dirname, '.env');
+const secretsExists = fs.existsSync(secretsEnvPath);
+const localEnvExists = fs.existsSync(localEnvPath);
+
+const secretsResult = secretsExists ? dotenv.config({ path: secretsEnvPath }) : null;
+const localResult = localEnvExists ? dotenv.config({ path: localEnvPath }) : null;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1893,6 +1901,14 @@ app.listen(PORT, () => {
   console.log(`🔒 Autenticación: JWT`);
   console.log(`💾 Base de datos: ${pool ? 'PostgreSQL' : 'En memoria (usar PostgreSQL/MongoDB en producción)'}`);
   console.log(`🧩 DATABASE_URL presente: ${Boolean(process.env.DATABASE_URL)}`);
+  console.log(`🧩 /etc/secrets/.env: ${secretsExists ? 'found' : 'missing'}`);
+  if (secretsResult?.error) {
+    console.log(`🧩 /etc/secrets/.env error: ${secretsResult.error.message}`);
+  }
+  console.log(`🧩 backend/.env: ${localEnvExists ? 'found' : 'missing'}`);
+  if (localResult?.error) {
+    console.log(`🧩 backend/.env error: ${localResult.error.message}`);
+  }
 });
 
 module.exports = app;
