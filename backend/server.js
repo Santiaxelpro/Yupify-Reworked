@@ -1038,6 +1038,87 @@ app.get('/api/playlist/:id', async (req, res) => {
   }
 });
 
+// ==================== LETRAS (LYRICSPLUS API) ====================
+app.get('/api/lyrics', async (req, res) => {
+  try {
+    // Aceptar 'track' como alias para 'title'
+    const { title, track, artist, album, duration, source } = req.query;
+    const finalTitle = title || track;
+
+    if (!finalTitle || !artist) {
+      return res.status(400).json({
+        error: "Faltan parámetros obligatorios: title (o track) y artist"
+      });
+    }
+
+    const buildArtistVariants = (raw) => {
+      const base = (raw || '').toString().trim();
+      if (!base) return [];
+      const variants = [base];
+      if (base.includes(',') && !base.includes('&')) {
+        const parts = base.split(',').map(p => p.trim()).filter(Boolean);
+        if (parts.length >= 2) {
+          const last = parts[parts.length - 1];
+          const head = parts.slice(0, -1).join(', ');
+          variants.push(`${head} & ${last}`);
+          variants.push(parts.join(' & '));
+        }
+      }
+      return Array.from(new Set(variants));
+    };
+
+    const artistVariants = buildArtistVariants(artist);
+    const albumVariants = album ? [album] : ["", finalTitle];
+    const durationVariants = duration ? [duration] : [""];
+    const baseSource = source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word";
+
+    const paramsVariants = [];
+    const seenParams = new Set();
+    for (const art of artistVariants) {
+      for (const alb of albumVariants) {
+        for (const dur of durationVariants) {
+          const paramsObj = {
+            title: finalTitle,
+            artist: art,
+            album: alb || "",
+            duration: dur || "",
+            source: baseSource
+          };
+          const key = JSON.stringify(paramsObj);
+          if (seenParams.has(key)) continue;
+          seenParams.add(key);
+          paramsVariants.push(paramsObj);
+        }
+      }
+    }
+
+    const lyricsSources = [
+      'https://lyricsplus.binimum.org/v2/lyrics/get',
+      'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get'
+    ];
+
+    let lastError = null;
+    for (const baseUrl of lyricsSources) {
+      for (const paramsObj of paramsVariants) {
+        const url = `${baseUrl}?${new URLSearchParams(paramsObj)}`;
+        console.log("-> Lyrics API:", url);
+        try {
+          const response = await axios.get(url, { timeout: 15000 });
+          return res.json(response.data);
+        } catch (err) {
+          lastError = err;
+        }
+      }
+    }
+
+    throw lastError || new Error('Lyrics API failed');
+
+  } catch (error) {
+    console.error("Error en /api/lyrics:", error.message);
+    res.status(500).json({ error: "Error obteniendo letras" });
+  }
+});
+
 
 // Obtener portada
 app.get('/api/cover', async (req, res) => {
@@ -1721,7 +1802,7 @@ app.get('/', (req, res) => {
       auth: ['/api/auth/register', '/api/auth/login'],
       music: ['/api/search', '/api/recommendations', '/api/track/:id', '/api/album/:id', '/api/artist/:id'],
       user: ['/api/user/playlists', '/api/user/favorites', '/api/user/history', '/api/user/stats'],
-      proxy: ['/api/dash/:id', '/api/cover', '/api/home', '/api/mix/:id']
+      proxy: ['/api/dash/:id', '/api/lyrics', '/api/cover', '/api/home', '/api/mix/:id']
     }
   });
 });

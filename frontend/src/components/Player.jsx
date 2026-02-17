@@ -13,6 +13,7 @@ import {
   FileText
 } from "lucide-react";
 import { getArtistName, getTrackDisplayTitle, getCoverUrl } from '../utils/helpers';
+import api from '../services/api';
 
 const Player = ({
   currentTrack = null,
@@ -45,30 +46,21 @@ const Player = ({
   preloadedLyrics = null
 }) => {
   const accent = '#1db954';
-  const accentSoft = 'rgba(29,185,84,0.4)';
-  const accentBg = 'rgba(29,185,84,0.08)';
-  const amLyricsRef = React.useRef(null);
-  const [amLyricsReady, setAmLyricsReady] = useState(false);
-  const [amLyricsError, setAmLyricsError] = useState(false);
-  const amLyricsScriptId = 'am-lyrics-loader';
-  const amLyricsSrc = 'https://cdn.jsdelivr.net/npm/@uimaxbai/am-lyrics@0.5.0/dist/src/am-lyrics.min.js';
   // ----------------------
   // 🔥 LYRICS MODAL
   // ----------------------
   const [lyricsOpen, setLyricsOpen] = useState(false);
+  const [lyricsContent, setLyricsContent] = useState("Cargando...");
   const [lyricsStructured, setLyricsStructured] = useState(null);
   const linesRef = React.useRef([]);
   const [activeLineIndex, setActiveLineIndex] = React.useState(-1);
   const [activeSyllableIndex, setActiveSyllableIndex] = React.useState(-1);
-
-  const currentTimeMs = Number.isFinite(currentTime) ? Math.max(0, Math.round(currentTime * 1000)) : 0;
-  const durationMs = Number.isFinite(duration) && duration > 0
-    ? Math.round(duration * 1000)
-    : (Number.isFinite(currentTrack?.duration) ? Math.round(currentTrack.duration * 1000) : undefined);
-  const lyricsTitle = currentTrack?.title || '';
-  const lyricsArtist = currentTrack ? getArtistName(currentTrack) : '';
-  const lyricsAlbum = currentTrack?.album?.title || '';
-  const lyricsQuery = [lyricsTitle, lyricsArtist].filter(Boolean).join(' ');
+  const [smoothTime, setSmoothTime] = React.useState(0);
+  const lyricsRafRef = React.useRef(null);
+  const lastAudioTimeRef = React.useRef(0);
+  const lastPerfRef = React.useRef(0);
+  const lastRateRef = React.useRef(1);
+  const lastActiveRef = React.useRef({ line: -1, syll: -1, time: 0 });
 
   const toMs = (t) => {
     if (t == null) return 0;
@@ -86,6 +78,8 @@ const Player = ({
     const raw = payload?.raw ?? payload;
     if (!raw) return { structured: null, text: "No se encontraron letras." };
     const data = raw?.data ?? raw;
+    const pickTime = (obj) => toMs(obj?.time ?? obj?.startTime ?? obj?.begin);
+    const pickDuration = (obj) => toMs(obj?.duration ?? obj?.dur ?? obj?.length);
 
     if (typeof data === 'string') {
       return { structured: null, text: data };
@@ -99,17 +93,21 @@ const Player = ({
       return { structured: null, text: data.result };
     }
 
-    if (data.lyrics && Array.isArray(data.lyrics) && data.lyrics.length > 0) {
-      const timesMs = data.lyrics.map(l => toMs(l?.time));
-      const validTimes = timesMs.filter(t => Number.isFinite(t) && t > 0);
+    const lyricsArray = Array.isArray(data?.lyrics)
+      ? data.lyrics
+      : (Array.isArray(data?.lines) ? data.lines : []);
+
+    if (lyricsArray && Array.isArray(lyricsArray) && lyricsArray.length > 0) {
+      const timesMs = lyricsArray.map(l => pickTime(l));
+      const validTimes = timesMs.filter(t => Number.isFinite(t) && t >= 0);
       const hasTiming = validTimes.length >= 2;
 
       let finalTimesMs = null;
       if (hasTiming) {
         finalTimesMs = timesMs;
       } else {
-        const durationsMs = data.lyrics.map(l => toMs(l?.duration));
-        const validDurations = durationsMs.filter(d => Number.isFinite(d) && d > 0);
+        const durationsMs = lyricsArray.map(l => pickDuration(l));
+        const validDurations = durationsMs.filter(d => Number.isFinite(d) && d >= 0);
         if (validDurations.length >= 2) {
           let acc = 0;
           finalTimesMs = durationsMs.map((d) => {
@@ -123,7 +121,7 @@ const Player = ({
       const isUntimed = data.type === 'None' || !finalTimesMs;
 
       if (isUntimed) {
-        const lines = data.lyrics
+        const lines = lyricsArray
           .map(l => (l && typeof l.text === 'string' ? l.text.trim() : ''))
           .filter(Boolean);
         return {
@@ -132,26 +130,37 @@ const Player = ({
         };
       }
 
-      const structured = data.lyrics.map((line, idx) => {
-        const syllabusRaw = Array.isArray(line.syllabus) ? line.syllabus : [];
+      const structured = lyricsArray.map((line, idx) => {
+        const syllabusRaw = Array.isArray(line.syllabus)
+          ? line.syllabus
+          : (Array.isArray(line.syllables) ? line.syllables : []);
         const validSyllableTimes = syllabusRaw.filter(s => {
-          const t = toMs(s?.time);
-          return Number.isFinite(t) && t > 0;
+          const t = pickTime(s);
+          return Number.isFinite(t) && t >= 0;
         });
 
         const syllabus = validSyllableTimes.length > 0
           ? syllabusRaw.map((s, si) => ({
               id: si,
-              time: toSeconds(s.time),
-              duration: toSeconds(s.duration),
+              time: toSeconds(pickTime(s)),
+              duration: toSeconds(pickDuration(s)),
               text: s.text || ''
             }))
           : [];
 
+        const rawDurationMs = pickDuration(line);
+        let lineDurationMs = Number.isFinite(rawDurationMs) ? rawDurationMs : null;
+        if (!Number.isFinite(lineDurationMs) || lineDurationMs <= 0) {
+          const nextStart = finalTimesMs[idx + 1];
+          if (Number.isFinite(nextStart)) {
+            lineDurationMs = Math.max(0, nextStart - finalTimesMs[idx]);
+          }
+        }
+
         return {
           id: idx,
           time: toSeconds(finalTimesMs[idx]),
-          duration: toSeconds(line.duration),
+          duration: Number.isFinite(lineDurationMs) ? toSeconds(lineDurationMs) : toSeconds(pickDuration(line)),
           text: line.text || '',
           syllabus
         };
@@ -173,11 +182,39 @@ const Player = ({
     return sTime;
   };
 
-  // Función que busca sílaba en un tiempo dado
-  const findActiveSyllable = React.useCallback((timeSeconds) => {
-    if (!lyricsStructured) return { foundLine: -1, foundSyll: -1 };
+  const getSyllableStarts = React.useCallback((line) => {
+    if (!line || !Array.isArray(line.syllabus) || line.syllabus.length === 0) return [];
+    if (Array.isArray(line._syllableStarts) && line._syllableStarts.length === line.syllabus.length) {
+      return line._syllableStarts;
+    }
+    const starts = line.syllabus.map(s => getAbsoluteSyllableTime(line, s));
+    for (let i = 1; i < starts.length; i++) {
+      if (starts[i] < starts[i - 1]) {
+        starts[i] = starts[i - 1];
+      }
+    }
+    line._syllableStarts = starts;
+    return starts;
+  }, []);
 
-    // Buscar la línea activa (la última que ha empezado)
+  const getSyllableSpan = React.useCallback((line, idx) => {
+    if (!line || !Array.isArray(line.syllabus) || line.syllabus.length === 0) return 0;
+    const starts = getSyllableStarts(line);
+    if (!starts[idx] && starts[idx] !== 0) return 0;
+    const start = starts[idx];
+    const nextStart = idx + 1 < starts.length
+      ? Math.max(starts[idx + 1], start)
+      : (Number.isFinite(line.duration) && Number.isFinite(line.time)
+          ? Math.max(line.time + line.duration, start)
+          : start + (Number.isFinite(line.syllabus[idx]?.duration) ? line.syllabus[idx].duration : 0.1));
+    const declared = Number.isFinite(line.syllabus[idx]?.duration) ? line.syllabus[idx].duration : 0;
+    const span = Math.max(declared, nextStart - start);
+    return Math.max(0.06, span);
+  }, [getSyllableStarts]);
+
+  // Función que busca línea activa (última que empezó)
+  const findActiveLine = React.useCallback((timeSeconds) => {
+    if (!lyricsStructured) return -1;
     let foundLine = -1;
     for (let i = 0; i < lyricsStructured.length; i++) {
       if (lyricsStructured[i].time <= timeSeconds) {
@@ -186,103 +223,165 @@ const Player = ({
         break;
       }
     }
-
-    if (foundLine === -1) return { foundLine: -1, foundSyll: -1 };
-
-    // Buscar la sílaba activa dentro de la línea (la última que ha empezado)
-    let foundSyll = -1;
-    const line = lyricsStructured[foundLine];
-    if (line.syllabus) {
-      for (let j = 0; j < line.syllabus.length; j++) {
-        const syllableTime = getAbsoluteSyllableTime(line, line.syllabus[j]);
-        if (syllableTime <= timeSeconds) {
-          foundSyll = j;
-        } else {
-          break;
-        }
-      }
-    }
-    
-    return { foundLine, foundSyll };
+    return foundLine;
   }, [lyricsStructured]);
+
+  React.useEffect(() => {
+    if (!lyricsOpen) {
+      if (lyricsRafRef.current && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(lyricsRafRef.current);
+      }
+      lyricsRafRef.current = null;
+      lastPerfRef.current = 0;
+      lastAudioTimeRef.current = 0;
+      setSmoothTime(currentTime || 0);
+      return;
+    }
+
+    let active = true;
+    const initNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const initAudio = audioRef?.current || document.getElementById('yupify-audio-player');
+    const initTime = initAudio && Number.isFinite(initAudio.currentTime) ? initAudio.currentTime : currentTime || 0;
+    lastAudioTimeRef.current = Number.isFinite(initTime) ? initTime : 0;
+    lastPerfRef.current = initNow;
+    lastRateRef.current = initAudio?.playbackRate || 1;
+    setSmoothTime(lastAudioTimeRef.current);
+
+    const tick = () => {
+      if (!active) return;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const audioEl = audioRef?.current || document.getElementById('yupify-audio-player');
+      const actualTime = audioEl && Number.isFinite(audioEl.currentTime) ? audioEl.currentTime : null;
+      const rate = audioEl?.playbackRate || 1;
+      const isPaused = audioEl ? audioEl.paused : false;
+
+      if (actualTime != null) {
+        if (Math.abs(actualTime - lastAudioTimeRef.current) > 0.015 || lastPerfRef.current === 0) {
+          lastAudioTimeRef.current = actualTime;
+          lastPerfRef.current = now;
+        }
+        lastRateRef.current = rate;
+      }
+
+      let predicted = lastAudioTimeRef.current + ((now - lastPerfRef.current) / 1000) * (lastRateRef.current || 1);
+      if (actualTime != null && Math.abs(predicted - actualTime) > 0.06) {
+        lastAudioTimeRef.current = actualTime;
+        lastPerfRef.current = now;
+        predicted = actualTime;
+      }
+
+      const nextTime = Number.isFinite(predicted) ? predicted : 0;
+      setSmoothTime((prev) => {
+        if (!isPaused && nextTime < prev && (prev - nextTime) < 0.05) {
+          return prev;
+        }
+        return Math.abs(prev - nextTime) < 0.001 ? prev : nextTime;
+      });
+      lyricsRafRef.current = requestAnimationFrame(tick);
+    };
+
+    lyricsRafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      active = false;
+      if (lyricsRafRef.current && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(lyricsRafRef.current);
+      }
+      lyricsRafRef.current = null;
+    };
+  }, [lyricsOpen, currentTime, audioRef]);
 
   // SIMPLE: actualizar sílaba activa cuando currentTime cambia (event listener del audio)
   React.useEffect(() => {
     if (!lyricsStructured) return;
 
-    const { foundLine, foundSyll } = findActiveSyllable(currentTime);
-    setActiveLineIndex(foundLine);
-    setActiveSyllableIndex(foundSyll);
+    const leadTime = 0.03;
+    const backSeekThreshold = 0.2;
+    const advanceEps = 0.01;
+    const currentT = smoothTime + leadTime;
 
-    // Scroll al verso activo
-    if (foundLine >= 0 && linesRef.current[foundLine]) {
-      try {
-        linesRef.current[foundLine].scrollIntoView({ behavior: 'smooth', block: 'center' });
-      } catch (e) {}
-    }
-  }, [currentTime, lyricsStructured, findActiveSyllable]);
+    const foundLine = findActiveLine(currentT);
+    const last = lastActiveRef.current;
 
-  React.useEffect(() => {
-    if (!lyricsOpen || !preloadedLyrics) return;
-    const { structured } = normalizeLyricsPayload(preloadedLyrics);
-    setLyricsStructured(structured);
-  }, [lyricsOpen, preloadedLyrics]);
-
-  React.useEffect(() => {
-    if (!lyricsOpen) return;
-
-    if (window.customElements?.get('am-lyrics')) {
-      setAmLyricsReady(true);
-      setAmLyricsError(false);
+    // Si hubo seek hacia atrás notable, recalcular libremente
+    if (currentT < (last.time - backSeekThreshold)) {
+      const resetLine = foundLine;
+      let resetSyll = -1;
+      const resetLineObj = lyricsStructured[resetLine];
+      if (resetLineObj?.syllabus?.length) {
+        const starts = getSyllableStarts(resetLineObj);
+        for (let i = 0; i < starts.length; i++) {
+          if (starts[i] <= currentT) resetSyll = i;
+          else break;
+        }
+        if (resetSyll < 0) resetSyll = 0;
+      }
+      lastActiveRef.current = { line: resetLine, syll: resetSyll, time: currentT };
+      setActiveLineIndex(resetLine);
+      setActiveSyllableIndex(resetSyll);
       return;
     }
 
-    const existing = document.getElementById(amLyricsScriptId);
-    if (existing) {
-      const check = setInterval(() => {
-        if (window.customElements?.get('am-lyrics')) {
-          setAmLyricsReady(true);
-          setAmLyricsError(false);
-          clearInterval(check);
-        }
-      }, 200);
-      return () => clearInterval(check);
+    let nextLine = foundLine;
+    let nextSyll = last.syll;
+
+    // Evitar retroceso de línea
+    if (nextLine < last.line && last.line >= 0) {
+      nextLine = last.line;
     }
 
-    const script = document.createElement('script');
-    script.id = amLyricsScriptId;
-    script.type = 'module';
-    script.src = amLyricsSrc;
-    script.onload = () => {
-      setAmLyricsReady(true);
-      setAmLyricsError(false);
-    };
-    script.onerror = () => {
-      setAmLyricsError(true);
-      setAmLyricsReady(false);
-    };
-    document.head.appendChild(script);
-  }, [lyricsOpen]);
+    const lineObj = lyricsStructured[nextLine];
+    if (lineObj?.syllabus?.length) {
+      const starts = getSyllableStarts(lineObj);
+      if (nextLine !== last.line || nextSyll < 0 || nextSyll >= starts.length) {
+        nextSyll = -1;
+        for (let i = 0; i < starts.length; i++) {
+          if (starts[i] <= currentT) nextSyll = i;
+          else break;
+        }
+        if (nextSyll < 0) nextSyll = 0;
+      } else {
+        // Avance monotónico según tiempos de sílaba
+        while (nextSyll + 1 < starts.length) {
+          const currentStart = starts[nextSyll];
+          const nextStart = starts[nextSyll + 1];
+          const minHold = Math.min(0.14, Math.max(0.06, getSyllableSpan(lineObj, nextSyll) * 0.55));
+          const heldLongEnough = (currentT - currentStart) >= minHold;
+          const nextReady = currentT >= (nextStart + advanceEps);
+          if (heldLongEnough && nextReady) {
+            nextSyll += 1;
+            continue;
+          }
+          break;
+        }
+      }
+    } else {
+      nextSyll = -1;
+    }
+
+    if (nextLine !== last.line || nextSyll !== last.syll) {
+      lastActiveRef.current = { line: nextLine, syll: nextSyll, time: currentT };
+    } else {
+      lastActiveRef.current.time = currentT;
+    }
+
+    setActiveLineIndex(nextLine);
+    setActiveSyllableIndex(nextSyll);
+
+    // Scroll al verso activo
+    if (nextLine >= 0 && linesRef.current[nextLine]) {
+      try {
+        linesRef.current[nextLine].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (e) {}
+    }
+  }, [smoothTime, lyricsStructured, findActiveLine, getSyllableStarts, getSyllableSpan]);
 
   React.useEffect(() => {
-    if (!lyricsOpen || !amLyricsReady) return;
-    const el = amLyricsRef.current;
-    if (!el) return;
-
-    const handleLineClick = (event) => {
-      const timestamp = event?.detail?.timestamp;
-      if (!Number.isFinite(timestamp)) return;
-      const audio = document.getElementById('yupify-audio-player');
-      if (!audio) return;
-      audio.currentTime = Math.max(0, timestamp / 1000);
-      audio.play();
-    };
-
-    el.addEventListener('line-click', handleLineClick);
-    return () => {
-      el.removeEventListener('line-click', handleLineClick);
-    };
-  }, [lyricsOpen, amLyricsReady]);
+    if (!lyricsOpen || !preloadedLyrics) return;
+    const { structured, text } = normalizeLyricsPayload(preloadedLyrics);
+    setLyricsStructured(structured);
+    setLyricsContent(text || '');
+  }, [lyricsOpen, preloadedLyrics]);
 
   // Click handler para seek a una sílaba
   const handleSyllableClick = React.useCallback((syllableTime) => {
@@ -293,9 +392,26 @@ const Player = ({
     }
   }, []);
 
-  const openLyrics = () => {
+  const openLyrics = async () => {
     if (!currentTrack) return;
+
     setLyricsOpen(true);
+    setLyricsContent("Cargando letras...");
+
+    try {
+      let payload = preloadedLyrics;
+      let parsed = normalizeLyricsPayload(payload);
+
+      if (!payload || (!parsed.structured && (!parsed.text || parsed.text === "No se encontraron letras."))) {
+        payload = await api.track.getLyrics(currentTrack.title, getArtistName(currentTrack));
+        parsed = normalizeLyricsPayload(payload);
+      }
+
+      setLyricsStructured(parsed.structured);
+      setLyricsContent(parsed.text || '');
+    } catch (err) {
+      setLyricsContent("Error al obtener letras.");
+    }
   };
 
   // ----------------------
@@ -352,24 +468,217 @@ const Player = ({
           border-radius: 999px;
         }
 
-        .am-lyrics-wrapper {
-          background: radial-gradient(circle at 20% 10%, rgba(29,185,84,0.18), transparent 45%),
-            radial-gradient(circle at 80% 0%, rgba(59,130,246,0.18), transparent 45%),
-            #0b0b0b;
-          border: 1px solid rgba(255,255,255,0.08);
-          border-radius: 18px;
-          padding: 14px;
-          height: min(70vh, 700px);
+        .lyrics-modal {
+          position: relative;
+          width: min(1100px, 100%);
+          height: min(86vh, 860px);
+          border-radius: 26px;
           overflow: hidden;
+          border: 1px solid rgba(255,255,255,0.08);
+          background: #0b0b0b;
+          box-shadow: 0 30px 80px rgba(0,0,0,0.55);
         }
 
-        am-lyrics {
-          display: block;
+        .lyrics-backdrop {
+          position: absolute;
+          inset: 0;
+          background-size: cover;
+          background-position: center;
+          filter: blur(36px) saturate(1.2);
+          opacity: 0.25;
+          transform: scale(1.1);
+        }
+
+        .lyrics-scrim {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(140deg, rgba(6,6,6,0.88), rgba(6,6,6,0.7) 45%, rgba(6,6,6,0.85));
+          z-index: 1;
+        }
+
+        .lyrics-content {
+          position: relative;
+          z-index: 2;
+          display: flex;
+          flex-direction: column;
           height: 100%;
+          padding: 28px;
+          gap: 20px;
+        }
+
+        .lyrics-panel {
+          flex: 1;
+          display: grid;
+          grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.4fr);
+          gap: 28px;
+          min-height: 0;
+        }
+
+        .lyrics-left {
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+          align-self: flex-start;
+        }
+
+        .lyrics-art {
           width: 100%;
-          --am-lyrics-highlight-color: #ffffff;
-          --hover-background-color: rgba(255,255,255,0.08);
-          --highlight-color: #ffffff;
+          max-width: 360px;
+          aspect-ratio: 1 / 1;
+          border-radius: 20px;
+          overflow: hidden;
+          box-shadow: 0 20px 50px rgba(0,0,0,0.4);
+          border: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .lyrics-art img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .lyrics-meta {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .lyrics-badge {
+          font-size: 11px;
+          letter-spacing: 0.32em;
+          text-transform: uppercase;
+          color: rgba(255,255,255,0.6);
+        }
+
+        .lyrics-title {
+          font-size: 28px;
+          font-weight: 700;
+          color: #fff;
+          line-height: 1.2;
+        }
+
+        .lyrics-artist {
+          font-size: 15px;
+          color: rgba(255,255,255,0.68);
+        }
+
+        .lyrics-right {
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .lyrics-scroll {
+          flex: 1;
+          overflow-y: auto;
+          padding-right: 12px;
+          min-height: 0;
+        }
+
+        .lyrics-lines {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+
+        .lyrics-line {
+          font-size: 20px;
+          line-height: 1.4;
+          color: rgba(255,255,255,0.4);
+          transition: color 0.2s ease, font-size 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
+          cursor: pointer;
+          padding: 6px 10px;
+          border-radius: 14px;
+          position: relative;
+        }
+
+        .lyrics-line.is-active {
+          color: #fff;
+          font-size: 26px;
+          background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02));
+          text-shadow: 0 0 18px rgba(255,255,255,0.25);
+          backdrop-filter: blur(10px);
+          transform: translateY(-1px);
+        }
+
+        .lyrics-line.is-active::before {
+          content: '';
+          position: absolute;
+          inset: -8px;
+          background: radial-gradient(60% 70% at 15% 50%, rgba(255,255,255,0.12), transparent 70%);
+          filter: blur(18px);
+          opacity: 0.75;
+          z-index: -1;
+        }
+
+        .lyrics-syllable {
+          display: inline-block;
+          margin-right: 4px;
+          padding: 0 1px;
+          transition: color 0.22s ease, text-shadow 0.26s ease;
+          color: rgba(255,255,255,0.35);
+          background-repeat: no-repeat;
+          background-size: 100% 100%;
+          background-position: 0 50%;
+          -webkit-text-fill-color: currentColor;
+          will-change: color, text-shadow;
+        }
+
+        .lyrics-syllable.is-sung {
+          color: rgba(29, 185, 84, 0.85);
+          text-shadow: 0 0 10px rgba(29, 185, 84, 0.35);
+        }
+
+        .lyrics-syllable.is-current {
+          color: #1db954;
+          text-shadow: 0 0 10px rgba(29, 185, 84, 0.45);
+        }
+
+        .lyrics-actions {
+          display: flex;
+          justify-content: flex-end;
+        }
+
+        .lyrics-close {
+          padding: 10px 18px;
+          border-radius: 999px;
+          font-weight: 600;
+          background: rgba(255,255,255,0.12);
+          color: #fff;
+          transition: background 0.2s ease;
+        }
+
+        .lyrics-close:hover {
+          background: rgba(255,255,255,0.2);
+        }
+
+        @media (max-width: 900px) {
+          .lyrics-panel {
+            grid-template-columns: 1fr;
+          }
+
+          .lyrics-left {
+            flex-direction: row;
+            align-items: center;
+          }
+
+          .lyrics-art {
+            width: 90px;
+            height: 90px;
+            max-width: 90px;
+          }
+
+          .lyrics-title {
+            font-size: 20px;
+          }
+
+          .lyrics-line {
+            font-size: 18px;
+          }
+
+          .lyrics-line.is-active {
+            font-size: 22px;
+          }
         }
       `}</style>
       {/* 🎤 Modal de Letras */}
@@ -379,88 +688,105 @@ const Player = ({
           onClick={() => setLyricsOpen(false)}
         >
           <div
-            className="bg-gray-900 p-8 rounded-2xl max-w-3xl w-full max-h-[85vh] border shadow-2xl flex flex-col"
-            style={{ borderColor: 'rgba(29,185,84,0.3)' }}
+            className="lyrics-modal"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="text-2xl font-bold mb-6 text-white">
-              🎤 Letras de <span style={{ color: accent }}>{displayTitle}</span>
-            </h2>
+            <div className="lyrics-backdrop" style={{ backgroundImage: `url(${tidalCover})` }} />
+            <div className="lyrics-scrim" />
+            <div className="lyrics-content">
+              <div className="lyrics-panel">
+                <div className="lyrics-left">
+                  <div className="lyrics-art">
+                    <img src={tidalCover} alt={displayTitle} />
+                  </div>
+                  <div className="lyrics-meta">
+                    <span className="lyrics-badge">Lyrics</span>
+                    <h2 className="lyrics-title">{displayTitle}</h2>
+                    <p className="lyrics-artist">{getArtistName(currentTrack)}</p>
+                  </div>
+                </div>
 
-            {amLyricsReady && !amLyricsError ? (
-              <div className="am-lyrics-wrapper">
-                <am-lyrics
-                  ref={amLyricsRef}
-                  song-title={lyricsTitle}
-                  song-artist={lyricsArtist}
-                  song-album={lyricsAlbum}
-                  song-duration={durationMs ?? ''}
-                  query={lyricsQuery}
-                  current-time={currentTimeMs}
-                  duration={durationMs ?? ''}
-                  highlight-color="#ffffff"
-                  hover-background-color="rgba(255,255,255,0.08)"
-                  font-family="'SF Pro Display','SF Pro Text',Inter,system-ui,sans-serif"
-                  autoscroll
-                  interpolate
-                ></am-lyrics>
-              </div>
-            ) : (
-              <div className="lyrics-container text-gray-100 leading-relaxed space-y-4 flex-1 overflow-y-auto pr-2">
-                {lyricsStructured && lyricsStructured.map((line, li) => {
-                  const isActiveLine = li === activeLineIndex;
-                  const hasSyllabus = line.syllabus && line.syllabus.length > 0;
-                  return (
-                    <div
-                      key={line.id}
-                      ref={(el) => (linesRef.current[li] = el)}
-                      className="text-base lg:text-lg py-2 cursor-pointer hover:opacity-80 transition-opacity rounded-md px-2"
-                      style={isActiveLine ? { backgroundColor: accentBg } : undefined}
-                      onClick={() => {
-                        if (Number.isFinite(line.time)) handleSyllableClick(line.time);
-                      }}
-                    >
-                      {hasSyllabus ? (
-                        line.syllabus.map((s, si) => {
-                          const isSung = li === activeLineIndex && si <= activeSyllableIndex;
-                          const syllableTime = getAbsoluteSyllableTime(line, s);
-                          const isActiveSyllableLine = li === activeLineIndex;
+                <div className="lyrics-right">
+                  <div className="lyrics-scroll lyrics-container">
+                    {lyricsStructured ? (
+                      <div className="lyrics-lines">
+                        {lyricsStructured.map((line, li) => {
+                          const isActiveLine = li === activeLineIndex;
+                          const hasSyllabus = line.syllabus && line.syllabus.length > 0;
+                          const renderTime = smoothTime + 0.02;
                           return (
-                            <span
-                              key={s.id}
-                              className={isSung ? 'font-bold text-lg drop-shadow-md' : 'text-gray-500'}
-                              style={{
-                                transition: 'all 0.08s ease-out',
-                                cursor: 'pointer',
-                                color: isSung ? accent : (isActiveSyllableLine ? accentSoft : undefined)
-                              }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (Number.isFinite(syllableTime)) handleSyllableClick(syllableTime);
+                            <div
+                              key={line.id}
+                              ref={(el) => (linesRef.current[li] = el)}
+                              className={`lyrics-line ${isActiveLine ? 'is-active' : ''}`}
+                              onClick={() => {
+                                if (Number.isFinite(line.time)) handleSyllableClick(line.time);
                               }}
                             >
-                              {s.text}
-                            </span>
+                              {hasSyllabus ? (
+                                line.syllabus.map((s, si) => {
+                                  const isActive = isActiveLine;
+                                  const syllableTime = getAbsoluteSyllableTime(line, s);
+                                  const syllableDuration = getSyllableSpan(line, si);
+                                  const effectiveDuration = Math.max(syllableDuration, 0.08);
+                                  const rawProgress = effectiveDuration > 0
+                                    ? (renderTime - syllableTime) / effectiveDuration
+                                    : 0;
+                                  const progress = isActive ? Math.max(0, Math.min(1, rawProgress)) : 0;
+                                  const eased = progress * progress * (3 - 2 * progress);
+                                  const alpha = 0.4 + (0.35 * eased);
+                                  const glow = 0.08 + (0.28 * eased);
+                                  const percent = Math.round(eased * 100);
+                                  const show = progress > 0.02;
+                                  const activeStyle = show
+                                    ? {
+                                        backgroundImage: `linear-gradient(90deg, rgba(29, 185, 84, ${alpha}) ${percent}%, rgba(255,255,255,0.24) ${percent}%)`,
+                                        WebkitBackgroundClip: 'text',
+                                        backgroundClip: 'text',
+                                        color: 'transparent',
+                                        WebkitTextFillColor: 'transparent',
+                                        textShadow: `0 0 ${Math.round(4 + 8 * eased)}px rgba(29, 185, 84, ${glow})`
+                                      }
+                                    : undefined;
+                                  return (
+                                    <span
+                                      key={s.id}
+                                      className="lyrics-syllable"
+                                      style={activeStyle}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (Number.isFinite(syllableTime)) handleSyllableClick(syllableTime);
+                                      }}
+                                    >
+                                      {s.text}
+                                    </span>
+                                  );
+                                })
+                              ) : (
+                                <span>{line.text}</span>
+                              )}
+                            </div>
                           );
-                        })
-                      ) : (
-                        <span style={{ color: isActiveLine ? accent : undefined }} className={isActiveLine ? 'font-bold' : 'text-gray-300'}>
-                          {line.text}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+                        })}
+                      </div>
+                    ) : (
+                      <pre className="whitespace-pre-wrap text-gray-300 leading-relaxed">
+                        {lyricsContent}
+                      </pre>
+                    )}
+                  </div>
+                </div>
               </div>
-            )}
 
-            <button
-              onClick={() => setLyricsOpen(false)}
-              className="mt-6 w-full py-3 rounded-lg font-semibold transition"
-              style={{ backgroundColor: accent }}
-            >
-              Cerrar
-            </button>
+              <div className="lyrics-actions">
+                <button
+                  onClick={() => setLyricsOpen(false)}
+                  className="lyrics-close"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
