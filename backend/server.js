@@ -41,7 +41,8 @@ if (USE_POSTGRES) {
 // Cache simple en memoria para search/track
 const CACHE_TTL = {
   search: 60 * 1000,
-  track: 5 * 60 * 1000
+  track: 5 * 60 * 1000,
+  lyrics: 10 * 60 * 1000
 };
 const cacheStore = new Map();
 
@@ -1051,6 +1052,12 @@ app.get('/api/lyrics', async (req, res) => {
       });
     }
 
+    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${source || ""}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const buildArtistVariants = (raw) => {
       const base = (raw || '').toString().trim();
       if (!base) return [];
@@ -1068,7 +1075,7 @@ app.get('/api/lyrics', async (req, res) => {
     };
 
     const artistVariants = buildArtistVariants(artist);
-    const albumVariants = album ? [album] : ["", finalTitle];
+    const albumVariants = album ? [album] : [finalTitle, ""];
     const durationVariants = duration ? [duration] : [""];
     const baseSource = source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word";
 
@@ -1092,23 +1099,49 @@ app.get('/api/lyrics', async (req, res) => {
       }
     }
 
+    const MAX_VARIANTS = 4;
+    const paramsToTry = paramsVariants.slice(0, MAX_VARIANTS);
+
     const lyricsSources = [
       'https://lyricsplus.binimum.org/v2/lyrics/get',
       'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get'
     ];
 
     let lastError = null;
+    let sawRateLimit = false;
     for (const baseUrl of lyricsSources) {
-      for (const paramsObj of paramsVariants) {
+      for (const paramsObj of paramsToTry) {
         const url = `${baseUrl}?${new URLSearchParams(paramsObj)}`;
         console.log("-> Lyrics API:", url);
         try {
           const response = await axios.get(url, { timeout: 15000 });
-          return res.json(response.data);
+          const payload = response.data;
+          const raw = payload?.data ?? payload;
+          const hasLyrics =
+            typeof raw === 'string'
+            || typeof raw?.lyrics === 'string'
+            || (Array.isArray(raw?.lyrics) && raw.lyrics.length > 0)
+            || typeof raw?.result === 'string';
+
+          if (hasLyrics) {
+            setCache(cacheKey, payload, CACHE_TTL.lyrics);
+            return res.json(payload);
+          }
+
+          lastError = new Error('Lyrics empty');
         } catch (err) {
           lastError = err;
+          const status = err?.response?.status;
+          if (status === 429) {
+            sawRateLimit = true;
+            break; // no insistir con este proveedor
+          }
         }
       }
+    }
+
+    if (sawRateLimit) {
+      return res.status(429).json({ error: "Rate limit en proveedor de letras" });
     }
 
     throw lastError || new Error('Lyrics API failed');
