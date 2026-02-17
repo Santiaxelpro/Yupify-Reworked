@@ -1116,12 +1116,23 @@ app.get('/api/lyrics', async (req, res) => {
         try {
           const response = await axios.get(url, { timeout: 15000 });
           const payload = response.data;
-          const raw = payload?.data ?? payload;
+          const hasLyricsPayload = (obj) => {
+            if (!obj) return false;
+            if (typeof obj === 'string') return obj.trim().length > 0;
+            if (Array.isArray(obj)) return obj.length > 0;
+            if (typeof obj === 'object') {
+              if (typeof obj.lyrics === 'string' && obj.lyrics.trim().length > 0) return true;
+              if (Array.isArray(obj.lyrics) && obj.lyrics.length > 0) return true;
+              if (Array.isArray(obj.lines) && obj.lines.length > 0) return true;
+              if (typeof obj.result === 'string' && obj.result.trim().length > 0) return true;
+            }
+            return false;
+          };
           const hasLyrics =
-            typeof raw === 'string'
-            || typeof raw?.lyrics === 'string'
-            || (Array.isArray(raw?.lyrics) && raw.lyrics.length > 0)
-            || typeof raw?.result === 'string';
+            hasLyricsPayload(payload)
+            || hasLyricsPayload(payload?.data)
+            || hasLyricsPayload(payload?.result)
+            || hasLyricsPayload(payload?.data?.result);
 
           if (hasLyrics) {
             setCache(cacheKey, payload, CACHE_TTL.lyrics);
