@@ -466,6 +466,10 @@ async function handleResponse(response) {
     } catch (e) {
       // Si no se puede parsear el JSON, mantenemos el error genérico
     }
+    if (response.status === 401) {
+      localStorage.removeItem('yupify_token');
+      localStorage.removeItem('yupify_user');
+    }
     throw new Error(errorMessage);
   }
 

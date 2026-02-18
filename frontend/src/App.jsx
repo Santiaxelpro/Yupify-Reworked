@@ -194,6 +194,11 @@ const App = () => {
       setHistory(historyData.history || historyData.raw?.history || historyData.items || []);
     } catch (err) {
       console.error('Error cargando datos:', err);
+      const message = String(err?.message || '').toLowerCase();
+      if (message.includes('token') || message.includes('401')) {
+        handleLogout();
+        setShowAuthModal(true);
+      }
     }
   };
 
