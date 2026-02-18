@@ -574,13 +574,63 @@ const App = () => {
     setShowUserMenu(false);
   };
 
+  const handleCreatePlaylist = async () => {
+    if (!isAuthenticated) {
+      setShowAuthModal(true);
+      return;
+    }
+    const name = window.prompt('Nombre de la playlist');
+    if (!name || !name.trim()) return;
+    const description = window.prompt('Descripción (opcional)') || '';
+    try {
+      await api.playlist.createPlaylist(name.trim(), description.trim(), true);
+      await loadUserData();
+    } catch (err) {
+      console.error('Error creando playlist:', err);
+    }
+  };
+
+  const scrollToLibrarySection = (sectionId) => {
+    const el = document.getElementById(sectionId);
+    if (!el) return;
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {}
+  };
+
+  const normalizeHistoryTrack = (entry) => {
+    if (!entry) return null;
+    const base = entry.trackData || entry.track || entry;
+    const id = base.id ?? entry.id ?? entry.trackId;
+    const title = base.title ?? entry.title;
+    const artistName = entry.artist || base.artist?.name || (typeof base.artist === 'string' ? base.artist : null);
+    const artists = Array.isArray(base.artists) && base.artists.length > 0
+      ? base.artists
+      : (artistName ? artistName.split(',').map(name => ({ name: name.trim() })) : []);
+    const album = base.album || (entry.cover ? { cover: entry.cover } : undefined);
+    return {
+      ...base,
+      id,
+      title,
+      artists,
+      artist: base.artist || (artistName ? { name: artistName } : base.artist),
+      album,
+      cover: base.cover || entry.cover,
+      duration: base.duration ?? entry.duration
+    };
+  };
+
+  const historyTracks = Array.isArray(history)
+    ? history.map(normalizeHistoryTrack).filter(Boolean)
+    : [];
+
   const lyricsKey = getLyricsKey(currentTrack);
   const preloadedLyrics = lyricsKey ? lyricsCache[lyricsKey] : null;
 
   return (
     <div className="flex flex-col h-screen bg-black text-white overflow-hidden">
       {/* Header */}
-      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20">
+      <div className="bg-gray-950 border-b border-gray-800 p-4 shadow-lg z-20 relative">
         <div className="flex items-center gap-4 mb-4">
           <div className="flex items-center gap-2 flex-shrink-0">
           <div className="bg-green-600 rounded-full p-2">
@@ -612,6 +662,21 @@ const App = () => {
             </div>
           )}
         </div>
+
+        {isAuthenticated && showUserMenu && (
+          <div className="md:hidden absolute right-4 top-20 bg-gray-900 rounded-xl shadow-2xl border border-gray-800 z-40 min-w-[220px]">
+            <div className="px-4 py-3 border-b border-gray-800">
+              <p className="text-sm font-semibold text-white truncate">{user?.name}</p>
+              <p className="text-xs text-gray-400 truncate">{user?.email}</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="w-full text-left px-4 py-3 text-sm text-red-400 hover:bg-red-900/20 rounded-b-xl"
+            >
+              Cerrar sesión
+            </button>
+          </div>
+        )}
         
         <div className="lg:pl-64">
           <SearchBar onSearch={handleSearch} loading={loading} />
@@ -704,25 +769,31 @@ const App = () => {
             <div className="space-y-8">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div 
-                  onClick={() => isAuthenticated ? setActiveTab('favorites') : setShowAuthModal(true)}
+                  onClick={() => isAuthenticated ? scrollToLibrarySection('library-favorites') : setShowAuthModal(true)}
                   className="bg-gradient-to-br from-[#1db954] to-emerald-400 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all"
                 >
                   <Heart size={32} className="mb-2" />
                   <h3 className="font-bold">Favoritos</h3>
                   <p className="text-sm opacity-80">{favorites.length} canciones</p>
                 </div>
-                <div className="bg-gradient-to-br from-blue-600 to-cyan-600 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all">
+                <div 
+                  onClick={() => scrollToLibrarySection('library-history')}
+                  className="bg-gradient-to-br from-blue-600 to-cyan-600 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all"
+                >
                   <Clock size={32} className="mb-2" />
                   <h3 className="font-bold">Historial</h3>
                   <p className="text-sm opacity-80">{history.length} canciones</p>
                 </div>
-                <div className="bg-gradient-to-br from-green-600 to-teal-600 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all">
+                <div 
+                  onClick={() => isAuthenticated ? scrollToLibrarySection('library-playlists') : setShowAuthModal(true)}
+                  className="bg-gradient-to-br from-green-600 to-teal-600 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all"
+                >
                   <Music size={32} className="mb-2" />
                   <h3 className="font-bold">Playlists</h3>
                   <p className="text-sm opacity-80">{myPlaylists.length} playlists</p>
                 </div>
                 <div 
-                  onClick={() => isAuthenticated ? {} : setShowAuthModal(true)}
+                  onClick={handleCreatePlaylist}
                   className="bg-gradient-to-br from-orange-600 to-red-600 rounded-xl p-6 cursor-pointer hover:shadow-xl transition-all"
                 >
                   <Plus size={32} className="mb-2" />
@@ -731,16 +802,58 @@ const App = () => {
                 </div>
               </div>
               
-              {isAuthenticated && favorites.length > 0 && (
-                <section>
+              {isAuthenticated && (
+                <section id="library-favorites">
                   <h2 className="text-2xl font-bold mb-4">Tus Favoritos</h2>
+                  {favorites.length > 0 ? (
+                    <TrackList
+                      tracks={favorites.slice(0, 10)}
+                      onPlay={handlePlayTrack}
+                      onToggleFavorite={handleToggleFavorite}
+                      favorites={favorites}
+                      currentTrackId={currentTrack?.id}
+                    />
+                  ) : (
+                    <p className="text-gray-400">Aún no tienes favoritos.</p>
+                  )}
+                </section>
+              )}
+
+              <section id="library-history">
+                <h2 className="text-2xl font-bold mb-4">Historial</h2>
+                {historyTracks.length > 0 ? (
                   <TrackList
-                    tracks={favorites.slice(0, 10)}
+                    tracks={historyTracks.slice(0, 20)}
                     onPlay={handlePlayTrack}
                     onToggleFavorite={handleToggleFavorite}
                     favorites={favorites}
                     currentTrackId={currentTrack?.id}
                   />
+                ) : (
+                  <p className="text-gray-400">No hay historial todavÃ­a.</p>
+                )}
+              </section>
+
+              {isAuthenticated && (
+                <section id="library-playlists">
+                  <h2 className="text-2xl font-bold mb-4">Playlists</h2>
+                  {myPlaylists.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {myPlaylists.map((pl) => (
+                        <div key={pl.id || pl._id || pl.name} className="bg-gray-900/60 border border-gray-800 rounded-xl p-4">
+                          <h3 className="font-semibold text-white truncate">{pl.name || pl.title || 'Playlist'}</h3>
+                          {pl.description && (
+                            <p className="text-xs text-gray-400 mt-1 line-clamp-2">{pl.description}</p>
+                          )}
+                          <p className="text-xs text-gray-500 mt-2">
+                            {(pl.trackCount ?? pl.tracks?.length ?? 0)} canciones
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-gray-400">AÃºn no tienes playlists.</p>
+                  )}
                 </section>
               )}
             </div>
