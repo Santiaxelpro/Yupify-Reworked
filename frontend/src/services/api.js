@@ -174,6 +174,40 @@ export const trackService = {
       { headers: getHeaders() }
     );
     return handleResponse(response);
+  },
+
+  downloadTrack: async (track, quality = 'LOSSLESS') => {
+    const trackId = track?.id ?? track?.trackId;
+    if (!trackId) {
+      throw new Error('Track inválido');
+    }
+    const response = await fetch(`${API_URL}/api/download/${trackId}`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({
+        quality,
+        track
+      })
+    });
+
+    if (!response.ok) {
+      let errorMessage = `API error: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.message || errorData.error || errorMessage;
+      } catch (e) {}
+      throw new Error(errorMessage);
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    let filename = null;
+    const match = disposition.match(/filename="([^"]+)"/i) || disposition.match(/filename=([^;]+)/i);
+    if (match) {
+      filename = match[1].trim();
+    }
+
+    return { blob, filename };
   }
 };
 

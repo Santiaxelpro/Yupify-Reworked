@@ -1,9 +1,9 @@
 // src/components/TrackCard.jsx
 import React from 'react';
-import { Play, Heart, MoreVertical } from 'lucide-react';
+import { Play, Heart, Download } from 'lucide-react';
 import { getArtistName, getCoverUrl, getTrackDisplayTitle } from '../utils/helpers';
 
-const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
+const TrackCard = ({ track, onPlay, onToggleFavorite, onDownload, isFavorite }) => {
   
   const getCover = () => {
     return getCoverUrl(track, 1280) || 'https://resources.tidal.com/images/5187b614/1c44/4694/9ab1/d675a3c41114/1280x1280.jpg';
@@ -33,6 +33,14 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, isFavorite }) => {
               size={18} 
               className={isFavorite ? 'fill-red-500 text-red-500' : 'text-white'} 
             />
+          </button>
+        )}
+        {onDownload && (
+          <button 
+            onClick={(e) => { e.stopPropagation(); onDownload(track); }}
+            className="absolute top-2 left-2 bg-black/50 backdrop-blur-sm rounded-full p-2 opacity-0 group-hover:opacity-100 transition-opacity"
+          >
+            <Download size={18} className="text-white" />
           </button>
         )}
       </div>

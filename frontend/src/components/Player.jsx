@@ -10,7 +10,8 @@ import {
   Share2,
   Repeat,
   Shuffle,
-  FileText
+  FileText,
+  Download
 } from "lucide-react";
 import { getArtistName, getTrackDisplayTitle, getCoverUrl } from '../utils/helpers';
 import api from '../services/api';
@@ -34,6 +35,7 @@ const Player = ({
   onVolumeChange = () => {},
   onToggleMute = () => {},
   onToggleFavorite = () => {},
+  onDownload = () => {},
   onToggleRepeat = () => {},
   onToggleShuffle = () => {},
   audioRef = null,
@@ -1042,6 +1044,10 @@ const Player = ({
                   : "text-gray-400 hover:text-white"
               }
             />
+          </button>
+
+          <button className="ml-2" onClick={() => onDownload(currentTrack)}>
+            <Download size={24} className="text-gray-400 hover:text-white" />
           </button>
 
           <button className="ml-2" onClick={openLyrics}>

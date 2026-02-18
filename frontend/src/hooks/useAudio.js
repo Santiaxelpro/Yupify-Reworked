@@ -3,6 +3,39 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../services/api';
 
 let shakaPlayer = null;
+const inlineManifestStore = new Map();
+let inlineSchemeRegistered = false;
+
+const registerInlineScheme = () => {
+  if (inlineSchemeRegistered || !window?.shaka?.net?.NetworkingEngine) return;
+  const shaka = window.shaka;
+  const plugin = (uri, request) => {
+    const data = inlineManifestStore.get(uri);
+    if (!data) {
+      return Promise.reject(new Error('Inline manifest not found'));
+    }
+    let buffer;
+    if (typeof TextEncoder !== 'undefined') {
+      buffer = new TextEncoder().encode(data).buffer;
+    } else {
+      const arr = new Uint8Array(Array.from(data).map((c) => c.charCodeAt(0)));
+      buffer = arr.buffer;
+    }
+    const isHead = (request?.method || '').toUpperCase() === 'HEAD';
+    return Promise.resolve({
+      uri,
+      originalUri: uri,
+      data: isHead ? new ArrayBuffer(0) : buffer,
+      headers: { 'content-type': 'application/dash+xml' }
+    });
+  };
+  shaka.net.NetworkingEngine.registerScheme(
+    'inline',
+    plugin,
+    shaka.net.NetworkingEngine.PluginPriority.APPLICATION
+  );
+  inlineSchemeRegistered = true;
+};
 
 // Crear elemento <audio> global que funcionará con o sin DOM
 const getAudioElement = () => {
@@ -48,6 +81,7 @@ const initShakaPlayer = async (audioElement) => {
       script.onload = async () => {
         if (window.shaka) {
           window.shaka.polyfill?.installAll?.();
+          registerInlineScheme();
           // Crear Player sin mediaElement (attach() es la forma recomendada)
           const player = new window.shaka.Player();
           player.addEventListener?.('error', (event) => {
@@ -60,6 +94,7 @@ const initShakaPlayer = async (audioElement) => {
       };
       document.head.appendChild(script);
     } else {
+      registerInlineScheme();
       const player = new window.shaka.Player();
       player.addEventListener?.('error', (event) => {
         console.error('Shaka player error:', event?.detail || event);
@@ -256,13 +291,58 @@ export const useAudio = () => {
 
       console.log("✅ Audio element disponible");
 
+      // Helper: fallback a calidades estándar (no DASH)
+      const tryFallback = async () => {
+        const fallbackQualities = ['LOSSLESS', 'HIGH', 'LOW'];
+        for (const q of fallbackQualities) {
+          try {
+            const fallbackData = await api.track.getTrack(track.id, q);
+            const presentation = String(fallbackData?.assetPresentation || '').toUpperCase();
+            if (presentation === 'PREVIEW') continue;
+            if (fallbackData?.manifestMimeType === 'application/dash+xml') continue;
+            if (fallbackData?.url) {
+              if (shakaPlayer && typeof shakaPlayer.detach === 'function') {
+                try {
+                  await shakaPlayer.detach();
+                } catch (e) {
+                  console.warn('Shaka detach warning:', e);
+                }
+              }
+              const trackWithUrl = { ...track, streamUrl: fallbackData.url, isDash: false };
+              setCurrentTrack(trackWithUrl);
+              setStreamUrl(fallbackData.url);
+              if (audioElement) {
+                audioElement.src = fallbackData.url;
+                audioElement.load();
+                audioElement.play().catch(console.error);
+                setIsPlaying(true);
+              }
+              return true;
+            }
+          } catch (e) {
+            // probar siguiente calidad
+          }
+        }
+        return false;
+      };
+
       // Obtener track data con calidad seleccionada
       const trackData = await api.track.getTrack(track.id, quality);
       console.log("📡 Track data:", trackData);
+      const presentation = String(trackData?.assetPresentation || '').toUpperCase();
 
       // Detectar si es DASH manifest (HI_RES)
       const isDash = trackData?.manifestMimeType === 'application/dash+xml';
       setIsDashPlayback(isDash);
+
+      if (presentation === 'PREVIEW') {
+        console.warn('🚫 Track en PREVIEW, intentando fallback...');
+        const ok = await tryFallback();
+        if (!ok) {
+          console.error('❌ No se pudo obtener stream FULL');
+        }
+        return;
+      }
 
       if (isDash) {
         // 🎬 DASH playback con Shaka Player
@@ -283,14 +363,13 @@ export const useAudio = () => {
             throw new Error('Manifest DASH inv?lido');
           }
 
-          const manifestBlob = new Blob([trackData.manifest], { type: 'application/dash+xml' });
-          const manifestUrl = URL.createObjectURL(manifestBlob);
-
+          const inlineKey = `inline://manifest/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          inlineManifestStore.set(inlineKey, trackData.manifest);
           try {
-            // Cargar manifest DASH con Shaka Player
-            await player.load(manifestUrl);
+            // Cargar manifest DASH con Shaka Player (inline)
+            await player.load(inlineKey, null, 'application/dash+xml');
           } finally {
-            URL.revokeObjectURL(manifestUrl);
+            inlineManifestStore.delete(inlineKey);
           }
 
           
@@ -323,35 +402,7 @@ export const useAudio = () => {
         } catch (error) {
           console.error("❌ Error en DASH playback:", error);
           // Fallback a LOSSLESS
-
-          const fallbackQualities = ['LOSSLESS', 'HIGH', 'LOW'];
-          for (const q of fallbackQualities) {
-            try {
-              const fallbackData = await api.track.getTrack(track.id, q);
-              if (fallbackData?.url) {
-                if (shakaPlayer && typeof shakaPlayer.detach === 'function') {
-                  try {
-                    await shakaPlayer.detach();
-                  } catch (e) {
-                    console.warn('Shaka detach warning:', e);
-                  }
-                }
-                const trackWithUrl = { ...track, streamUrl: fallbackData.url, isDash: false };
-                setCurrentTrack(trackWithUrl);
-                setStreamUrl(fallbackData.url);
-                
-                if (audioElement) {
-                  audioElement.src = fallbackData.url;
-                  audioElement.load();
-                  audioElement.play().catch(console.error);
-                  setIsPlaying(true);
-                }
-                break;
-              }
-            } catch (e) {
-              // probar siguiente calidad
-            }
-          }
+          await tryFallback();
         }
       } else {
         // 🎵 Standard playback (JSON manifest)
@@ -360,7 +411,8 @@ export const useAudio = () => {
         if (!realUrl) {
           console.error("❌ No se encontró URL en track data");
           console.error("Track data structure:", trackData);
-          return;
+          const ok = await tryFallback();
+          if (!ok) return;
         }
 
 

@@ -67,6 +67,7 @@ const App = () => {
   const autoNextRef = useRef(null);
   const autoplayRunIdRef = useRef(0);
   const lyricsInFlightRef = useRef(new Set());
+  const downloadInFlightRef = useRef(false);
   const [lyricsCache, setLyricsCache] = useState({});
   const [favorites, setFavorites] = useState([]);
   const [trendingTracks, setTrendingTracks] = useState([]);
@@ -488,6 +489,29 @@ const App = () => {
     }
   };
 
+  const handleDownloadTrack = async (track) => {
+    if (!track?.id) return;
+    if (downloadInFlightRef.current) return;
+    downloadInFlightRef.current = true;
+
+    try {
+      const { blob, filename } = await api.track.downloadTrack(track, quality);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const fallbackExt = quality?.includes('LOSSLESS') ? 'flac' : 'm4a';
+      link.download = filename || `${track.title || 'track'}.${fallbackExt}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Error descargando track:', err);
+    } finally {
+      downloadInFlightRef.current = false;
+    }
+  };
+
   const handleAutoNext = async () => {
     if (autoNextInFlightRef.current) return;
     autoNextInFlightRef.current = true;
@@ -706,6 +730,7 @@ const App = () => {
                         track={track}
                         onPlay={handlePlayTrack}
                         onToggleFavorite={handleToggleFavorite}
+                        onDownload={handleDownloadTrack}
                         isFavorite={favorites.some(f => f.id === track.id)}
                       />
                     ))}
@@ -737,6 +762,7 @@ const App = () => {
                   tracks={searchResults}
                   onPlay={handlePlayTrack}
                   onToggleFavorite={handleToggleFavorite}
+                  onDownload={handleDownloadTrack}
                   favorites={favorites}
                   currentTrackId={currentTrack?.id}
                 />
@@ -759,6 +785,7 @@ const App = () => {
                   tracks={queue}
                   onPlay={handlePlayTrack}
                   onToggleFavorite={handleToggleFavorite}
+                  onDownload={handleDownloadTrack}
                   favorites={favorites}
                   currentTrackId={currentTrack?.id}
                 />
@@ -815,6 +842,7 @@ const App = () => {
                       tracks={favorites.slice(0, 10)}
                       onPlay={handlePlayTrack}
                       onToggleFavorite={handleToggleFavorite}
+                      onDownload={handleDownloadTrack}
                       favorites={favorites}
                       currentTrackId={currentTrack?.id}
                     />
@@ -831,6 +859,7 @@ const App = () => {
                     tracks={historyTracks.slice(0, 20)}
                     onPlay={handlePlayTrack}
                     onToggleFavorite={handleToggleFavorite}
+                    onDownload={handleDownloadTrack}
                     favorites={favorites}
                     currentTrackId={currentTrack?.id}
                   />
@@ -897,6 +926,7 @@ const App = () => {
   onVolumeChange={handleVolumeChange}
   onToggleMute={toggleMute}
   onToggleFavorite={handleToggleFavorite}
+  onDownload={handleDownloadTrack}
   onToggleRepeat={() => setIsRepeat(!isRepeat)}
   onToggleShuffle={() => setIsShuffle(!isShuffle)}
   onTimeUpdate={handleTimeUpdate}

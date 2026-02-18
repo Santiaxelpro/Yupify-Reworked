@@ -9,6 +9,21 @@ const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { pipeline } = require('stream/promises');
+const { spawn } = require('child_process');
+let ffmpegPath = null;
+try {
+  ffmpegPath = require('ffmpeg-static');
+} catch (err) {
+  ffmpegPath = null;
+}
+if (!ffmpegPath && process.env.FFMPEG_PATH) {
+  ffmpegPath = process.env.FFMPEG_PATH;
+}
+if (!ffmpegPath) {
+  ffmpegPath = 'ffmpeg';
+}
 const dotenv = require('dotenv');
 
 const secretsEnvPath = '/etc/secrets/.env';
@@ -102,7 +117,8 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  exposedHeaders: ['Content-Disposition']
 }));
 app.use(express.json());
 
@@ -284,6 +300,153 @@ function shuffleArray(arr) {
   }
   return a;
 }
+
+function sanitizeFilename(value) {
+  if (!value) return 'track';
+  return value
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180) || 'track';
+}
+
+function getArtistString(track) {
+  if (!track) return '';
+  if (Array.isArray(track.artists) && track.artists.length > 0) {
+    return track.artists.map(a => a?.name || a).filter(Boolean).join(', ');
+  }
+  if (track.artist?.name) return track.artist.name;
+  if (typeof track.artist === 'string') return track.artist;
+  return '';
+}
+
+function buildCoverUrlFromTrack(track, size = 1280) {
+  if (!track) return null;
+  const rawCover = track.cover || track.album?.cover;
+  if (!rawCover) return null;
+  if (typeof rawCover === 'string' && rawCover.startsWith('http')) {
+    return rawCover;
+  }
+  if (typeof rawCover !== 'string') return null;
+  const trimmed = rawCover.trim();
+  if (!trimmed) return null;
+  let coverId = null;
+  if (trimmed.includes('/')) {
+    const clean = trimmed.replace(/^\//, '');
+    if (/^[0-9a-fA-F/]{20,}$/.test(clean)) {
+      coverId = clean;
+    }
+  } else if (/^[0-9a-fA-F-]{32,36}$/.test(trimmed)) {
+    coverId = trimmed.replace(/-/g, '/');
+  }
+  if (!coverId) return null;
+  return `https://resources.tidal.com/images/${coverId}/${size}x${size}.jpg`;
+}
+
+function inferAudioExtension(url, usedQuality) {
+  try {
+    const pathname = new URL(url).pathname;
+    const ext = path.extname(pathname).replace('.', '').toLowerCase();
+    if (ext) return ext;
+  } catch (e) {}
+  if (usedQuality && usedQuality.includes('LOSSLESS')) return 'flac';
+  return 'm4a';
+}
+
+async function downloadToFile(url, destPath) {
+  const response = await axios.get(url, { responseType: 'stream', timeout: 0 });
+  await pipeline(response.data, fs.createWriteStream(destPath));
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath || 'ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on('error', (err) => {
+      reject(new Error(`FFmpeg no disponible: ${err.message}`));
+    });
+    proc.on('close', (code) => {
+      if (code === 0) return resolve();
+      return reject(new Error(stderr || `FFmpeg falló con código ${code}`));
+    });
+  });
+}
+
+function tryDecodeManifest(m) {
+  if (!m || typeof m !== 'string') return null;
+
+  let b64 = m.replace(/\s+/g, '');
+  b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4;
+  if (pad === 2) b64 += '==';
+  else if (pad === 3) b64 += '=';
+
+  try {
+    const decodedStr = Buffer.from(b64, 'base64').toString('utf8');
+    try {
+      return JSON.parse(decodedStr);
+    } catch (e) {
+      return decodedStr;
+    }
+  } catch (err) {
+    return null;
+  }
+}
+
+async function resolveTrackForDownload(id, qRaw) {
+  const VALID_QUALITIES = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"];
+  const requestedQuality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
+  const qualityFallback = {
+    "HI_RES_LOSSLESS": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+    "LOSSLESS": ["LOSSLESS", "HIGH", "LOW"],
+    "HIGH": ["HIGH", "LOSSLESS", "LOW"],
+    "LOW": ["LOW", "HIGH", "LOSSLESS"]
+  };
+  const qualitiesToTry = qualityFallback[requestedQuality] || [requestedQuality];
+  const allAPIs = Object.values(HIFI_APIS).flat();
+  const shuffledAPIs = shuffleArray(allAPIs);
+  const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
+
+  let success = null;
+  let usedQuality = null;
+  for (const quality of qualitiesToTry) {
+    success = await fetchFirstTrackData({ apis: fastAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
+    if (!success) {
+      success = await fetchFirstTrackData({ apis: allAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
+    }
+    if (success) {
+      usedQuality = quality;
+      break;
+    }
+  }
+
+  if (!success) {
+    return { error: "No se pudo obtener el track en ninguna calidad" };
+  }
+
+  const respData = { ...success.data };
+  const decoded = tryDecodeManifest(respData.manifest);
+  if (decoded !== null) {
+    respData.manifest = decoded;
+  }
+
+  let streamUrl = respData.url || null;
+  if (!streamUrl && respData.manifest && typeof respData.manifest === 'object' && Array.isArray(respData.manifest.urls)) {
+    streamUrl = respData.manifest.urls[0];
+    respData.url = streamUrl;
+  }
+
+  return {
+    respData,
+    streamUrl,
+    usedQuality,
+    requestedQuality
+  };
+}
+
 async function fetchFirstSearchResult({ apis, searchQuery, limit, offset, timeoutMs = 4500 }) {
   const requests = apis.map(api => (
     axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: timeoutMs })
@@ -311,10 +474,18 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
     return axiosFast.get(url, { timeout: timeoutMs })
       .then(r => {
         const data = r.data;
-        if (data && data.data && data.data.manifestMimeType && data.data.manifest) {
-          return { ok: true, url, data: data.data };
+        const payload = data?.data;
+        if (!payload || !payload.manifestMimeType || !payload.manifest) {
+          return Promise.reject(new Error('Invalid track'));
         }
-        return Promise.reject(new Error('Invalid track'));
+        const presentation = String(payload.assetPresentation || '').toUpperCase();
+        if (presentation === 'PREVIEW') {
+          return Promise.reject(new Error('Preview asset'));
+        }
+        if (payload.streamReady === false) {
+          return Promise.reject(new Error('Stream not ready'));
+        }
+        return { ok: true, url, data: payload };
       });
   });
 
@@ -786,29 +957,6 @@ app.get('/api/track/:id', async (req, res) => {
       // Decodificar manifest si viene en base64
       const respData = { ...success.data };
 
-      function tryDecodeManifest(m) {
-        if (!m || typeof m !== 'string') return null;
-
-        // Normalizar base64 URL-safe -> standard
-        let b64 = m.replace(/\s+/g, '');
-        b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
-        // Añadir padding si es necesario
-        const pad = b64.length % 4;
-        if (pad === 2) b64 += '==';
-        else if (pad === 3) b64 += '=';
-
-        try {
-          const decodedStr = Buffer.from(b64, 'base64').toString('utf8');
-          try {
-            return JSON.parse(decodedStr);
-          } catch (e) {
-            return decodedStr;
-          }
-        } catch (err) {
-          return null;
-        }
-      }
-
       const decoded = tryDecodeManifest(respData.manifest);
       if (decoded !== null) {
         // Reemplazar manifest por el objeto/string decodificado (sin duplicar)
@@ -846,6 +994,125 @@ app.get('/api/track/:id', async (req, res) => {
   } catch (error) {
     console.error("❌ Error en TRACK:", error.message);
     res.status(500).json({ error: "Error interno al obtener track" });
+  }
+});
+
+// Descargar track con metadata embebida
+app.post('/api/download/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quality, track } = req.body || {};
+
+    if (!ffmpegPath) {
+      return res.status(500).json({ error: 'FFmpeg no disponible en el servidor' });
+    }
+
+    const qRaw = (quality || "LOSSLESS").toUpperCase().trim();
+    let resolved = await resolveTrackForDownload(id, qRaw);
+    if (resolved?.error) {
+      return res.status(500).json({ error: resolved.error });
+    }
+
+    let { respData, streamUrl, usedQuality } = resolved;
+
+    // Si es DASH, forzar fallback a LOSSLESS para descarga
+    if (respData?.manifestMimeType === 'application/dash+xml') {
+      resolved = await resolveTrackForDownload(id, "LOSSLESS");
+      if (resolved?.error) {
+        return res.status(500).json({ error: resolved.error });
+      }
+      respData = resolved.respData;
+      streamUrl = resolved.streamUrl;
+      usedQuality = resolved.usedQuality;
+    }
+
+    if (!streamUrl) {
+      return res.status(500).json({ error: 'No se pudo resolver URL de descarga' });
+    }
+
+    const title = track?.title || `Track ${id}`;
+    const artist = getArtistString(track);
+    const albumTitle = track?.album?.title || track?.albumTitle || '';
+    const trackNumber = track?.trackNumber || '';
+    const discNumber = track?.volumeNumber || '';
+    const isrc = track?.isrc || '';
+    const releaseDateRaw = track?.streamStartDate || track?.releaseDate || '';
+    const releaseYear = releaseDateRaw ? new Date(releaseDateRaw).getFullYear() : '';
+
+    const coverUrl = buildCoverUrlFromTrack(track, 1280);
+    const inputExt = inferAudioExtension(streamUrl, usedQuality);
+    const outputExt = inputExt === 'flac' ? 'flac' : (inputExt === 'mp3' ? 'mp3' : 'm4a');
+
+    const baseName = sanitizeFilename(`${artist ? artist + ' - ' : ''}${title}`);
+    const filename = `${baseName}.${outputExt}`;
+
+    const tmpDir = os.tmpdir();
+    const inputPath = path.join(tmpDir, `yupify-${id}-${Date.now()}-in.${inputExt}`);
+    const outputPath = path.join(tmpDir, `yupify-${id}-${Date.now()}-out.${outputExt}`);
+    const coverPath = coverUrl ? path.join(tmpDir, `yupify-${id}-${Date.now()}-cover.jpg`) : null;
+
+    try {
+      await downloadToFile(streamUrl, inputPath);
+      if (coverUrl) {
+        await downloadToFile(coverUrl, coverPath);
+      }
+
+      const args = ['-y', '-i', inputPath];
+      if (coverPath) {
+        args.push('-i', coverPath, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
+        args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
+      } else {
+        args.push('-map', '0:a');
+      }
+
+      args.push('-c', 'copy');
+
+      if (outputExt === 'mp3') {
+        args.push('-id3v2_version', '3');
+      }
+
+      if (title) args.push('-metadata', `title=${title}`);
+      if (artist) args.push('-metadata', `artist=${artist}`);
+      if (albumTitle) args.push('-metadata', `album=${albumTitle}`);
+      if (trackNumber) args.push('-metadata', `track=${trackNumber}`);
+      if (discNumber) args.push('-metadata', `disc=${discNumber}`);
+      if (releaseYear) args.push('-metadata', `date=${releaseYear}`);
+      if (isrc) args.push('-metadata', `isrc=${isrc}`);
+
+      args.push(outputPath);
+
+      await runFfmpeg(args);
+
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      if (outputExt === 'flac') {
+        res.setHeader('Content-Type', 'audio/flac');
+      } else if (outputExt === 'mp3') {
+        res.setHeader('Content-Type', 'audio/mpeg');
+      } else {
+        res.setHeader('Content-Type', 'audio/mp4');
+      }
+
+      const stream = fs.createReadStream(outputPath);
+      stream.pipe(res);
+      stream.on('close', () => {
+        try { fs.unlinkSync(outputPath); } catch {}
+        try { fs.unlinkSync(inputPath); } catch {}
+        if (coverPath) {
+          try { fs.unlinkSync(coverPath); } catch {}
+        }
+      });
+    } catch (err) {
+      console.error('Error en descarga:', err.message);
+      try { fs.unlinkSync(outputPath); } catch {}
+      try { fs.unlinkSync(inputPath); } catch {}
+      if (coverPath) {
+        try { fs.unlinkSync(coverPath); } catch {}
+      }
+      return res.status(500).json({ error: 'Error generando descarga' });
+    }
+  } catch (error) {
+    console.error('Error en /api/download:', error.message);
+    return res.status(500).json({ error: 'Error interno al descargar' });
   }
 });
 

@@ -1,9 +1,9 @@
 // src/components/TrackList.jsx
 import React from 'react';
-import { Play, Heart, MoreVertical } from 'lucide-react';
+import { Play, Heart, Download } from 'lucide-react';
 import { getCoverUrl, getArtistName, getTrackDisplayTitle } from '../utils/helpers';
 
-const TrackList = ({ tracks, onPlay, onToggleFavorite, favorites = [], currentTrackId }) => {
+const TrackList = ({ tracks, onPlay, onToggleFavorite, onDownload, favorites = [], currentTrackId }) => {
   
   const formatTime = (seconds) => {
     if (!seconds) return '0:00';
@@ -65,12 +65,14 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, favorites = [], currentTr
               </button>
             )}
             
-            <button
-              onClick={(e) => e.stopPropagation()}
-              className="text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              <MoreVertical size={20} />
-            </button>
+            {onDownload && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onDownload(track); }}
+                className="text-gray-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <Download size={20} />
+              </button>
+            )}
           </div>
         );
       })}
