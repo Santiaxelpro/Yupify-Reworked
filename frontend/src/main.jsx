@@ -3,16 +3,20 @@ import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import './index.css'
 
-// Registrar Service Worker para PWA
+// Desactivar Service Worker para evitar HTML cacheado con assets viejos
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js')
-      .then(registration => {
-        console.log('SW registrado:', registration)
-      })
-      .catch(error => {
-        console.log('SW registro falló:', error)
-      })
+  window.addEventListener('load', async () => {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(registrations.map(r => r.unregister()))
+      if ('caches' in window) {
+        const keys = await caches.keys()
+        await Promise.all(keys.map(k => caches.delete(k)))
+      }
+      console.log('SW desactivado y cachés limpiadas')
+    } catch (error) {
+      console.log('No se pudo limpiar SW/cachés:', error)
+    }
   })
 }
 
