@@ -1358,8 +1358,31 @@ app.get('/api/lyrics', async (req, res) => {
     }
     if (sourcesList.length === 0) sourcesList = [...DEFAULT_SOURCES];
     const baseSource = sourcesList.join(',');
+    const explicitSingleSource = Boolean(sourceOnly) || (source && parseSources(source).length === 1);
+    const providerParam = (req.query.provider || '').toString().toLowerCase().trim();
+    const DEFAULT_PROVIDERS = ['binimum', 'atomix', 'vercel', 'prjktla'];
+    const parseProviders = (value) => (
+      (value || '')
+        .toString()
+        .split(',')
+        .map(s => s.trim().toLowerCase())
+        .filter(Boolean)
+    );
 
-    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${baseSource}`;
+    let providerList = providerParam ? parseProviders(providerParam) : [...DEFAULT_PROVIDERS];
+    if (providerParam === 'all') {
+      providerList = [...DEFAULT_PROVIDERS];
+    }
+    if (explicitSingleSource) {
+      // Si el cliente fuerza una sola fuente, evitar fallback al provider rate-limited
+      providerList = providerList.filter(p => p !== 'prjktla');
+      if (providerList.length === 0) providerList = ['binimum'];
+    }
+    providerList = Array.from(new Set(providerList)).filter(p => DEFAULT_PROVIDERS.includes(p));
+    if (providerList.length === 0) providerList = [...DEFAULT_PROVIDERS];
+    const providerKey = providerList.join('|');
+
+    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${baseSource}|${providerKey}`;
     const cached = getCache(cacheKey);
     if (cached) {
       return res.json(cached);
@@ -1413,10 +1436,15 @@ app.get('/api/lyrics', async (req, res) => {
     const MAX_VARIANTS = 4;
     const paramsToTry = paramsVariants.slice(0, MAX_VARIANTS);
 
-    const lyricsSources = [
-      'https://lyricsplus.binimum.org/v2/lyrics/get',
-      'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get'
-    ];
+    const providerUrls = {
+      binimum: 'https://lyricsplus.binimum.org/v2/lyrics/get',
+      prjktla: 'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get',
+      atomix:  'https://lyricsplus.atomix.one/v2/lyrics/get',
+      vercel:  'https://lyricsplus-seven.vercel.app/v2/lyrics/get'
+    };
+    const lyricsSources = providerList
+      .map(p => providerUrls[p])
+      .filter(Boolean);
 
     let lastError = null;
     let sawRateLimit = false;
