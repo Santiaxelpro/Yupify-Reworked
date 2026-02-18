@@ -164,8 +164,11 @@ export const trackService = {
     };
   },
 
-  getLyrics: async (title, artist) => {
+  getLyrics: async (title, artist, options = {}) => {
     const params = new URLSearchParams({ track: title, artist: artist });
+    if (options.source) params.set('source', options.source);
+    if (options.sourcePrefer) params.set('sourcePrefer', options.sourcePrefer);
+    if (options.sourceOnly) params.set('sourceOnly', options.sourceOnly);
     const response = await fetch(
       `${API_URL}/api/lyrics?${params.toString()}`,
       { headers: getHeaders() }

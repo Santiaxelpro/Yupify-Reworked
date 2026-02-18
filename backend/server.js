@@ -1062,7 +1062,7 @@ app.get('/api/playlist/:id', async (req, res) => {
 app.get('/api/lyrics', async (req, res) => {
   try {
     // Aceptar 'track' como alias para 'title'
-    const { title, track, artist, album, duration, source } = req.query;
+    const { title, track, artist, album, duration, source, sourcePrefer, sourceOnly } = req.query;
     const finalTitle = title || track;
 
     if (!finalTitle || !artist) {
@@ -1071,7 +1071,28 @@ app.get('/api/lyrics', async (req, res) => {
       });
     }
 
-    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${source || ""}`;
+    const DEFAULT_SOURCES = ['apple', 'musixmatch', 'lyricsplus', 'spotify', 'musixmatch-word'];
+    const parseSources = (value) => (
+      (value || '')
+        .toString()
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+    );
+
+    let sourcesList = source ? parseSources(source) : [...DEFAULT_SOURCES];
+    if (sourceOnly) {
+      sourcesList = [sourceOnly.toString().trim()].filter(Boolean);
+    } else if (sourcePrefer) {
+      const prefer = sourcePrefer.toString().trim();
+      if (prefer) {
+        sourcesList = [prefer, ...sourcesList.filter(s => s !== prefer)];
+      }
+    }
+    if (sourcesList.length === 0) sourcesList = [...DEFAULT_SOURCES];
+    const baseSource = sourcesList.join(',');
+
+    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${baseSource}`;
     const cached = getCache(cacheKey);
     if (cached) {
       return res.json(cached);
@@ -1101,7 +1122,6 @@ app.get('/api/lyrics', async (req, res) => {
     });
     const albumVariants = album ? [album] : ["", finalTitle];
     const durationVariants = duration ? [duration] : [""];
-    const baseSource = source || "apple,lyricsplus,musixmatch,spotify,musixmatch-word";
 
     const paramsVariants = [];
     const seenParams = new Set();
@@ -1221,14 +1241,37 @@ app.get('/api/cover', async (req, res) => {
 app.get('/api/home', async (req, res) => {
   try {
     const { country = 'US' } = req.query;
-    const api = await getRandomAPI();
+    const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+    const shuffledAPIs = shuffleArray(allAPIs);
+    const fastAPIs = shuffledAPIs.slice(0, FAST_SEARCH_POOL);
 
+    const fetchHome = async (apis) => {
+      if (!apis || apis.length === 0) return null;
+      try {
+        return await Promise.any(
+          apis.map(api =>
+            axiosFast.get(`${api}/home/?country=${country}`, { timeout: 7000 })
+              .then(r => {
+                const data = r.data;
+                if (data && (Array.isArray(data?.items) || data?.data || Object.keys(data).length > 0)) {
+                  return data;
+                }
+                return Promise.reject(new Error('Empty home'));
+              })
+          )
+        );
+      } catch {
+        return null;
+      }
+    };
 
-    const response = await axios.get(`${api}/home/?country=${country}`, {
-      timeout: 10000
-    });
+    const fastResult = await fetchHome(fastAPIs);
+    if (fastResult) return res.json(fastResult);
 
-    res.json(response.data);
+    const fullResult = await fetchHome(shuffledAPIs);
+    if (fullResult) return res.json(fullResult);
+
+    return res.status(502).json({ error: 'No se pudo obtener home' });
   } catch (error) {
     console.error('Error al obtener home:', error.message);
     res.status(500).json({ error: 'Error al obtener home' });

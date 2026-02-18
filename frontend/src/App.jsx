@@ -18,20 +18,12 @@ import Navigation from './components/Navigation';
 // Services
 import api from './services/api';
 import { getArtistName, getLocalStorage, setLocalStorage } from './utils/helpers';
-import {
-  buildCandidates,
-  rankWithMMR,
-  normalizeText,
-  getGenreTerm,
-  getAlbumTerm,
-  getTrackKey
-} from './utils/autoplay';
+import { normalizeText, getTrackKey } from './utils/autoplay';
 
 const GUEST_HISTORY_KEY = 'yupify_guest_history';
 const MAX_HISTORY_ITEMS = 100;
 const SKIP_RATIO_THRESHOLD = 0.35;
 const SKIP_SECONDS_THRESHOLD = 30;
-const MIN_SAME_GENRE_CANDIDATES = 8;
 
 const App = () => {
   // Audio hook
@@ -83,10 +75,7 @@ const App = () => {
   const [myPlaylists, setMyPlaylists] = useState([]);
   const [history, setHistory] = useState([]);
   const [homeContent, setHomeContent] = useState(null);
-  const sessionSeedRef = useRef(null);
-  if (!sessionSeedRef.current) {
-    sessionSeedRef.current = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  }
+  
   
   // Estados UI
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -422,63 +411,6 @@ const App = () => {
     return `${id}|${title}|${artist}`.toLowerCase();
   };
 
-  const buildAutoplayContext = (current, trendingSource, maxPlays) => {
-    const favoriteIds = new Set();
-    const favoriteKeys = new Set();
-    favorites.forEach(track => {
-      if (!track) return;
-      if (track.id != null) favoriteIds.add(track.id);
-      const key = getTrackKey(track);
-      if (key) favoriteKeys.add(key);
-    });
-
-    const historyIndexById = new Map();
-    const historyIndexByKey = new Map();
-    const historyById = new Map();
-    const historyByKey = new Map();
-
-    history.forEach((track, index) => {
-      if (!track) return;
-      if (track.id != null && !historyIndexById.has(track.id)) {
-        historyIndexById.set(track.id, index);
-      }
-      if (track.id != null && !historyById.has(track.id)) {
-        historyById.set(track.id, track);
-      }
-      const key = getTrackKey(track);
-      if (key && !historyIndexByKey.has(key)) {
-        historyIndexByKey.set(key, index);
-      }
-      if (key && !historyByKey.has(key)) {
-        historyByKey.set(key, track);
-      }
-    });
-
-    const trendingIds = new Set(
-      (trendingSource || [])
-        .map(track => track?.id)
-        .filter(id => id != null)
-    );
-
-    return {
-      currentTrack: current,
-      favoriteIds,
-      favoriteKeys,
-      historyIndexById,
-      historyIndexByKey,
-      historyById,
-      historyByKey,
-      historyLength: history.length,
-      trendingIds,
-      maxPlays,
-      sessionSeed: sessionSeedRef.current,
-      sessionJitter: 0.03,
-      relatednessFloor: 0.12,
-      minRelated: 10,
-      minSameGenreCandidates: MIN_SAME_GENRE_CANDIDATES
-    };
-  };
-
   const fetchAutoplayTracks = async () => {
     if (!currentTrack) return [];
 
@@ -487,32 +419,19 @@ const App = () => {
     const currentId = currentSnapshot?.id ?? null;
 
     try {
-      const artistName = getArtistName(currentSnapshot);
-      const useArtist = artistName && artistName !== 'Artista Desconocido';
-      const genreTerm = getGenreTerm(currentSnapshot);
-      const albumTerm = getAlbumTerm(currentSnapshot);
-
-      const searchPromises = [];
-      if (useArtist) {
-        searchPromises.push(api.search.searchArtist(artistName, 25));
-        searchPromises.push(api.search.search(artistName, 20));
-      }
-      if (genreTerm) searchPromises.push(api.search.search(genreTerm, 20));
-      if (albumTerm) searchPromises.push(api.search.searchAlbum(albumTerm, 20));
-      if (useArtist && genreTerm) searchPromises.push(api.search.search(`${artistName} ${genreTerm}`, 20));
-
       const recommendationsPromise = api.recommendations
-        .getRecommendations(currentId, 25, 0)
+        .getRecommendations(currentId, 30, 0)
         .catch(() => null);
 
-      const searchResults = await Promise.allSettled(searchPromises);
       const recommendationsResult = await recommendationsPromise;
       if (runId !== autoplayRunIdRef.current || currentTrack?.id !== currentId) return [];
 
-      const searchItems = searchResults.flatMap(result => (
-        result.status == 'fulfilled' ? (result.value?.items || []) : []
-      ));
       const recommendationsItems = recommendationsResult?.items || [];
+      const recommendationsTracks = Array.isArray(recommendationsItems)
+        ? recommendationsItems
+            .map((item) => (item && item.track ? item.track : item))
+            .filter(Boolean)
+        : [];
 
       let trendingSource = trendingTracks;
       if (!Array.isArray(trendingSource) || trendingSource.length === 0) {
@@ -522,42 +441,42 @@ const App = () => {
 
       if (runId !== autoplayRunIdRef.current || currentTrack?.id !== currentId) return [];
 
-      const candidates = buildCandidates({
-        sources: [recommendationsItems, searchItems, favorites, history, trendingSource],
-        currentTrack: currentSnapshot,
-        queue,
-        playedIds: playedRef.current,
-        playedTitleKeys: playedTitleRef.current,
-        recentArtists: [],
-        limit: 300
-      });
+      const queueIds = new Set(queue.map(t => t?.id).filter(id => id != null));
+      const seenIds = new Set([currentId, ...queueIds, ...playedRef.current]);
+      const seenKeys = new Set();
 
-      const maxPlays = candidates.reduce((max, track) => {
-        const plays = Number(track?.plays);
-        return Number.isFinite(plays) ? Math.max(max, plays) : max;
-      }, 0);
-      const context = buildAutoplayContext(currentSnapshot, trendingSource, maxPlays);
-      let ranked = rankWithMMR(candidates, context, 20);
+      const filterTracks = (items, limit, allowRepeats = false) => {
+        if (!Array.isArray(items) || items.length === 0) return [];
+        const results = [];
+        for (const track of items) {
+          if (!track) continue;
+          const trackId = track.id ?? track.trackId ?? null;
+          if (trackId == null) continue;
+          if (!allowRepeats && seenIds.has(trackId)) continue;
+          const key = getTrackKey(track);
+          if (!allowRepeats && key && seenKeys.has(key)) continue;
+          seenIds.add(trackId);
+          if (key) seenKeys.add(key);
+          results.push(track);
+          if (results.length >= limit) break;
+        }
+        return results;
+      };
 
-      if (ranked.length === 0 && trendingSource.length > 0) {
-        const fallbackCandidates = buildCandidates({
-          sources: [trendingSource],
-          currentTrack: currentSnapshot,
-          queue,
-          playedIds: playedRef.current,
-          playedTitleKeys: playedTitleRef.current,
-          recentArtists: [],
-          limit: 200
-        });
-        const fallbackMaxPlays = fallbackCandidates.reduce((max, track) => {
-          const plays = Number(track?.plays);
-          return Number.isFinite(plays) ? Math.max(max, plays) : max;
-        }, 0);
-        const fallbackContext = buildAutoplayContext(currentSnapshot, trendingSource, fallbackMaxPlays);
-        ranked = rankWithMMR(fallbackCandidates, fallbackContext, 20);
+      let results = filterTracks(recommendationsTracks, 20, false);
+      if (results.length === 0 && Array.isArray(recommendationsTracks) && recommendationsTracks.length > 0) {
+        // Si hay recomendaciones pero todas quedaron filtradas, permitir repetidos antes de ir a trending
+        results = filterTracks(recommendationsTracks, 20, true);
+      }
+      if (results.length === 0 && Array.isArray(trendingSource) && trendingSource.length > 0) {
+        results = filterTracks(trendingSource, 20, false);
+      }
+      if (results.length === 0 && Array.isArray(trendingSource) && trendingSource.length > 0) {
+        // Relax repeats to avoid dead-ends
+        results = filterTracks(trendingSource, 20, true);
       }
 
-      return ranked;
+      return results;
     } catch (err) {
       console.error('Error en autoplay:', err);
       return [];

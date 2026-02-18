@@ -52,6 +52,9 @@ const Player = ({
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [lyricsContent, setLyricsContent] = useState("Cargando...");
   const [lyricsStructured, setLyricsStructured] = useState(null);
+  const [lyricsSource, setLyricsSource] = useState('auto');
+  const [availableSources, setAvailableSources] = useState({});
+  const [checkingSources, setCheckingSources] = useState(false);
   const linesRef = React.useRef([]);
   const [activeLineIndex, setActiveLineIndex] = React.useState(-1);
   const [activeSyllableIndex, setActiveSyllableIndex] = React.useState(-1);
@@ -61,6 +64,15 @@ const Player = ({
   const lastPerfRef = React.useRef(0);
   const lastRateRef = React.useRef(1);
   const lastActiveRef = React.useRef({ line: -1, syll: -1, time: 0 });
+  const lyricsSourcesCacheRef = React.useRef(new Map());
+  const lyricsSources = React.useMemo(() => ([
+    { id: 'auto', label: 'Automático (Apple)' },
+    { id: 'apple', label: 'Apple' },
+    { id: 'musixmatch', label: 'Musixmatch' },
+    { id: 'lyricsplus', label: 'LyricsPlus' },
+    { id: 'spotify', label: 'Spotify' },
+    { id: 'musixmatch-word', label: 'Musixmatch Word' }
+  ]), []);
 
   const toMs = (t) => {
     if (t == null) return 0;
@@ -171,6 +183,32 @@ const Player = ({
 
     return { structured: null, text: "No se encontraron letras." };
   };
+
+  const getLyricsSourceName = (payload) => {
+    if (!payload) return '';
+    const raw = payload?.raw ?? payload;
+    const data = raw?.data ?? raw;
+    const meta = data?.metadata ?? raw?.metadata ?? raw?.data?.metadata;
+    const source = meta?.source || data?.source || raw?.source;
+    return typeof source === 'string' ? source.toLowerCase().trim() : '';
+  };
+
+  const isLyricsEmpty = (parsed) => {
+    if (parsed?.structured && parsed.structured.length > 0) return false;
+    const text = (parsed?.text || '').trim();
+    if (!text) return true;
+    if (text === "No se encontraron letras.") return true;
+    if (text === "No lyrics found.") return true;
+    return false;
+  };
+
+  const getLyricsKey = React.useCallback(() => {
+    if (!currentTrack) return '';
+    const baseId = currentTrack.id || currentTrack.trackId || '';
+    const title = (currentTrack.title || '').toLowerCase();
+    const artist = (getArtistName(currentTrack) || '').toLowerCase();
+    return `${baseId}|${title}|${artist}`;
+  }, [currentTrack]);
 
   const getAbsoluteSyllableTime = (line, syllable) => {
     if (!syllable || syllable.time == null) return 0;
@@ -376,12 +414,102 @@ const Player = ({
     }
   }, [smoothTime, lyricsStructured, findActiveLine, getSyllableStarts, getSyllableSpan]);
 
+  const trackTitle = currentTrack?.title || '';
+  const trackArtist = currentTrack ? getArtistName(currentTrack) : '';
+  const trackKey = React.useMemo(() => getLyricsKey(), [getLyricsKey]);
+
   React.useEffect(() => {
-    if (!lyricsOpen || !preloadedLyrics) return;
-    const { structured, text } = normalizeLyricsPayload(preloadedLyrics);
-    setLyricsStructured(structured);
-    setLyricsContent(text || '');
-  }, [lyricsOpen, preloadedLyrics]);
+    if (!trackKey) return;
+    setLyricsSource('auto');
+    setAvailableSources({});
+    setCheckingSources(false);
+    setLyricsStructured(null);
+    setLyricsContent("Cargando...");
+  }, [trackKey]);
+
+  React.useEffect(() => {
+    if (!lyricsOpen || !currentTrack) return;
+    const cacheKey = trackKey;
+    if (!cacheKey) return;
+
+    const cached = lyricsSourcesCacheRef.current.get(cacheKey);
+    if (cached) {
+      setAvailableSources(cached);
+      setCheckingSources(false);
+      return;
+    }
+
+    let cancelled = false;
+    setCheckingSources(true);
+
+    const run = async () => {
+      const results = {};
+      for (const source of lyricsSources) {
+        if (source.id === 'auto') continue;
+        try {
+          const payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: source.id });
+          const parsed = normalizeLyricsPayload(payload);
+          results[source.id] = !isLyricsEmpty(parsed);
+        } catch (e) {
+          results[source.id] = false;
+        }
+        if (cancelled) return;
+      }
+
+      if (!cancelled) {
+        lyricsSourcesCacheRef.current.set(cacheKey, results);
+        setAvailableSources(results);
+        setCheckingSources(false);
+      }
+    };
+
+    run();
+
+    return () => {
+      cancelled = true;
+      setCheckingSources(false);
+    };
+  }, [lyricsOpen, trackKey, trackTitle, trackArtist, lyricsSources]);
+
+  React.useEffect(() => {
+    if (!lyricsOpen || !currentTrack) return;
+    let cancelled = false;
+
+    const load = async () => {
+      setLyricsContent("Cargando letras...");
+      setLyricsStructured(null);
+
+      try {
+        let payload = null;
+        let parsed = null;
+        if (lyricsSource === 'auto') {
+          payload = preloadedLyrics;
+          parsed = normalizeLyricsPayload(payload);
+          const sourceName = getLyricsSourceName(payload);
+          const fromApple = sourceName.includes('apple');
+          if (!payload || isLyricsEmpty(parsed) || !fromApple) {
+            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: 'apple' });
+            parsed = normalizeLyricsPayload(payload);
+          }
+        } else {
+          payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource });
+          parsed = normalizeLyricsPayload(payload);
+        }
+
+        if (cancelled) return;
+        setLyricsStructured(parsed.structured);
+        setLyricsContent(parsed.text || '');
+      } catch (err) {
+        if (!cancelled) setLyricsContent("Error al obtener letras.");
+      }
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [lyricsOpen, lyricsSource, trackKey, trackTitle, trackArtist, preloadedLyrics]);
 
   // Click handler para seek a una sílaba
   const handleSyllableClick = React.useCallback((syllableTime) => {
@@ -392,26 +520,11 @@ const Player = ({
     }
   }, []);
 
-  const openLyrics = async () => {
+  const openLyrics = () => {
     if (!currentTrack) return;
-
     setLyricsOpen(true);
     setLyricsContent("Cargando letras...");
-
-    try {
-      let payload = preloadedLyrics;
-      let parsed = normalizeLyricsPayload(payload);
-
-      if (!payload || (!parsed.structured && (!parsed.text || parsed.text === "No se encontraron letras."))) {
-        payload = await api.track.getLyrics(currentTrack.title, getArtistName(currentTrack));
-        parsed = normalizeLyricsPayload(payload);
-      }
-
-      setLyricsStructured(parsed.structured);
-      setLyricsContent(parsed.text || '');
-    } catch (err) {
-      setLyricsContent("Error al obtener letras.");
-    }
+    setLyricsStructured(null);
   };
 
   // ----------------------
@@ -427,6 +540,16 @@ const Player = ({
   const fallbackCover = 'https://resources.tidal.com/images/ddd75a35/5b2d/409c/abe3/7368b34f02f0/1280x1280.jpg';
   const tidalCover = getCoverUrl(currentTrack, 1280) || fallbackCover;
   const displayTitle = getTrackDisplayTitle(currentTrack);
+  const availableSourceLabels = lyricsSources
+    .filter((source) => source.id !== 'auto' && availableSources[source.id])
+    .map((source) => source.label);
+  const sourcesStatusText = checkingSources
+    ? 'Verificando fuentes...'
+    : (Object.keys(availableSources).length === 0
+        ? 'Fuentes sin verificar'
+        : (availableSourceLabels.length > 0
+            ? `Disponibles: ${availableSourceLabels.join(', ')}`
+            : 'No hay fuentes disponibles'));
 
   return (
     <>
@@ -562,6 +685,48 @@ const Player = ({
           color: rgba(255,255,255,0.68);
         }
 
+        .lyrics-source {
+          margin-top: 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .lyrics-source label {
+          font-size: 10px;
+          letter-spacing: 0.3em;
+          text-transform: uppercase;
+          color: rgba(255,255,255,0.5);
+        }
+
+        .lyrics-source select {
+          background: rgba(255,255,255,0.08);
+          border: 1px solid rgba(255,255,255,0.18);
+          color: #fff;
+          padding: 8px 12px;
+          border-radius: 999px;
+          font-size: 12px;
+          outline: none;
+          appearance: none;
+          -webkit-appearance: none;
+          color-scheme: dark;
+        }
+
+        .lyrics-source select:focus {
+          border-color: rgba(29, 185, 84, 0.6);
+          box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.2);
+        }
+
+        .lyrics-source small {
+          font-size: 11px;
+          color: rgba(255,255,255,0.5);
+        }
+
+        .lyrics-source select option {
+          background: #0b0b0b;
+          color: #fff;
+        }
+
         .lyrics-right {
           min-height: 0;
           display: flex;
@@ -635,21 +800,29 @@ const Player = ({
         }
 
         .lyrics-actions {
+          position: absolute;
+          top: 22px;
+          right: 22px;
+          z-index: 3;
           display: flex;
           justify-content: flex-end;
         }
 
         .lyrics-close {
-          padding: 10px 18px;
+          padding: 10px 16px;
           border-radius: 999px;
           font-weight: 600;
-          background: rgba(255,255,255,0.12);
+          background: rgba(18,18,18,0.72);
+          border: 1px solid rgba(255,255,255,0.12);
           color: #fff;
+          font-size: 12px;
+          letter-spacing: 0.02em;
+          box-shadow: 0 10px 24px rgba(0,0,0,0.35);
           transition: background 0.2s ease;
         }
 
         .lyrics-close:hover {
-          background: rgba(255,255,255,0.2);
+          background: rgba(255,255,255,0.18);
         }
 
         @media (max-width: 900px) {
@@ -679,6 +852,11 @@ const Player = ({
           .lyrics-line.is-active {
             font-size: 22px;
           }
+
+          .lyrics-actions {
+            top: 14px;
+            right: 14px;
+          }
         }
       `}</style>
       {/* 🎤 Modal de Letras */}
@@ -703,6 +881,31 @@ const Player = ({
                     <span className="lyrics-badge">Lyrics</span>
                     <h2 className="lyrics-title">{displayTitle}</h2>
                     <p className="lyrics-artist">{getArtistName(currentTrack)}</p>
+                    <div className="lyrics-source">
+                      <label>Fuente</label>
+                      <select
+                        value={lyricsSource}
+                        onChange={(e) => setLyricsSource(e.target.value)}
+                      >
+                        {lyricsSources.map((source) => {
+                          const isAvailable = source.id === 'auto' ? true : availableSources[source.id];
+                          const isDisabled = source.id !== 'auto' && (checkingSources ? isAvailable !== true : isAvailable === false);
+                          const statusLabel = source.id === 'auto'
+                            ? source.label
+                            : (isAvailable === true
+                                ? source.label
+                                : (checkingSources && isAvailable == null
+                                    ? `${source.label} (verificando...)`
+                                    : `${source.label} (no disponible)`));
+                          return (
+                            <option key={source.id} value={source.id} disabled={isDisabled}>
+                              {statusLabel}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <small>{sourcesStatusText}</small>
+                    </div>
                   </div>
                 </div>
 
