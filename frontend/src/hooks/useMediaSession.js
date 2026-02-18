@@ -82,12 +82,22 @@ const useMediaSession = ({
     if (!duration || duration <= 0) return;
 
     const playbackRate = audioRef?.current?.playbackRate ?? 1;
+    const safeDuration = Math.max(0, Number(duration) || 0);
+    let safePosition = Number(currentTime);
+    if (!Number.isFinite(safePosition)) safePosition = 0;
+    if (safeDuration > 0) {
+      safePosition = Math.max(0, Math.min(safeDuration, safePosition));
+    }
 
-    navigator.mediaSession.setPositionState({
-      duration,
-      position: currentTime,
-      playbackRate
-    });
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: safeDuration,
+        position: safePosition,
+        playbackRate
+      });
+    } catch (err) {
+      // Avoid crashing when the browser is strict about duration/position bounds.
+    }
   }, [currentTime, duration, audioRef]);
 
   useEffect(() => {
