@@ -44,9 +44,14 @@ export const authService = {
     });
 
     const data = await handleResponse(response);
-    localStorage.setItem('yupify_token', data.token);
-    localStorage.setItem('yupify_user', JSON.stringify(data.user));
-    return data;
+    const raw = data?.raw ?? data;
+    if (raw?.token) {
+      localStorage.setItem('yupify_token', raw.token);
+    }
+    if (raw?.user) {
+      localStorage.setItem('yupify_user', JSON.stringify(raw.user));
+    }
+    return raw;
   },
 
   // Iniciar sesión
@@ -58,9 +63,14 @@ export const authService = {
     });
 
     const data = await handleResponse(response);
-    localStorage.setItem('yupify_token', data.token);
-    localStorage.setItem('yupify_user', JSON.stringify(data.user));
-    return data;
+    const raw = data?.raw ?? data;
+    if (raw?.token) {
+      localStorage.setItem('yupify_token', raw.token);
+    }
+    if (raw?.user) {
+      localStorage.setItem('yupify_user', JSON.stringify(raw.user));
+    }
+    return raw;
   },
 
   // Cerrar sesión
