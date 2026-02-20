@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const path = require('path');
@@ -83,6 +84,114 @@ const getCache = (key) => {
 const setCache = (key, value, ttlMs) => {
   cacheStore.set(key, { value, expiresAt: Date.now() + ttlMs });
 };
+
+// ==== Google Drive cache (lyrics) ====
+const isNonEmpty = (value) => typeof value === 'string' && value.trim().length > 0;
+const GDRIVE_CACHE_FOLDER = process.env.GDRIVE_CACHED_LYRICS || process.env.GDRIVE_CACHED_MUSIXMATCH || '';
+const gdriveState = { accessToken: null, expiresAt: 0 };
+
+const hasGDriveConfig = () => (
+  isNonEmpty(process.env.AUTH_KEY_CLIENT_ID) &&
+  isNonEmpty(process.env.AUTH_KEY_CLIENT_SECRET) &&
+  isNonEmpty(process.env.AUTH_KEY_REFRESH_TOKEN) &&
+  isNonEmpty(GDRIVE_CACHE_FOLDER)
+);
+
+async function getGDriveAccessToken() {
+  if (gdriveState.accessToken && gdriveState.expiresAt > Date.now() + 10_000) {
+    return gdriveState.accessToken;
+  }
+
+  const response = await axios.post(
+    'https://www.googleapis.com/oauth2/v4/token',
+    new URLSearchParams({
+      client_id: process.env.AUTH_KEY_CLIENT_ID,
+      client_secret: process.env.AUTH_KEY_CLIENT_SECRET,
+      refresh_token: process.env.AUTH_KEY_REFRESH_TOKEN,
+      grant_type: 'refresh_token'
+    }).toString(),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
+
+  const data = response.data || {};
+  if (!data.access_token) {
+    throw new Error('No access_token returned from Google OAuth');
+  }
+  gdriveState.accessToken = data.access_token;
+  gdriveState.expiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
+  return gdriveState.accessToken;
+}
+
+async function gdriveRequest(method, url, data, headers = {}) {
+  const token = await getGDriveAccessToken();
+  return axios({
+    method,
+    url,
+    data,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...headers
+    }
+  });
+}
+
+function buildLyricsCacheFileName(cacheKey) {
+  const hash = crypto.createHash('sha1').update(cacheKey).digest('hex');
+  return `lyrics_${hash}.json`;
+}
+
+async function findGDriveFileByName(fileName) {
+  const q = `name = '${fileName}' and '${GDRIVE_CACHE_FOLDER}' in parents and trashed = false`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`;
+  const resp = await gdriveRequest('GET', url, null);
+  const files = resp.data?.files || [];
+  return files[0] || null;
+}
+
+async function downloadGDriveFile(fileId) {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const resp = await gdriveRequest('GET', url, null, { 'Accept': 'application/json' });
+  return resp.data;
+}
+
+async function createGDriveFile(fileName) {
+  const url = 'https://www.googleapis.com/drive/v3/files';
+  const metadata = { name: fileName, parents: [GDRIVE_CACHE_FOLDER] };
+  const resp = await gdriveRequest('POST', url, metadata, { 'Content-Type': 'application/json' });
+  return resp.data?.id;
+}
+
+async function updateGDriveFile(fileId, content) {
+  const url = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
+  await gdriveRequest('PATCH', url, content, { 'Content-Type': 'application/json' });
+}
+
+async function loadLyricsCacheFromGDrive(cacheKey) {
+  if (!hasGDriveConfig()) return null;
+  const fileName = buildLyricsCacheFileName(cacheKey);
+  const file = await findGDriveFileByName(fileName);
+  if (!file?.id) return null;
+  const content = await downloadGDriveFile(file.id);
+  if (typeof content === 'string') {
+    try {
+      return JSON.parse(content);
+    } catch {
+      return content;
+    }
+  }
+  return content;
+}
+
+async function saveLyricsCacheToGDrive(cacheKey, payload) {
+  if (!hasGDriveConfig()) return;
+  const fileName = buildLyricsCacheFileName(cacheKey);
+  const file = await findGDriveFileByName(fileName);
+  const content = JSON.stringify(payload);
+
+  const fileId = file?.id || await createGDriveFile(fileName);
+  if (!fileId) throw new Error('Failed to create cache file in Google Drive');
+  await updateGDriveFile(fileId, content);
+}
 const FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
 const SEARCH_TIMEOUT_MS = 4500;
@@ -1388,6 +1497,12 @@ app.get('/api/lyrics', async (req, res) => {
       return res.json(cached);
     }
 
+    const gdriveCached = await loadLyricsCacheFromGDrive(cacheKey);
+    if (gdriveCached) {
+      setCache(cacheKey, gdriveCached, CACHE_TTL.lyrics);
+      return res.json(gdriveCached);
+    }
+
     const buildArtistVariants = (raw) => {
       const base = (raw || '').toString().trim();
       if (!base) return [];
@@ -1485,6 +1600,11 @@ app.get('/api/lyrics', async (req, res) => {
 
           if (hasLyrics) {
             setCache(cacheKey, payload, CACHE_TTL.lyrics);
+            try {
+              await saveLyricsCacheToGDrive(cacheKey, payload);
+            } catch (e) {
+              console.warn('GDrive cache failed:', e.message);
+            }
             return res.json(payload);
           }
 
