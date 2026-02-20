@@ -87,16 +87,67 @@ const setCache = (key, value, ttlMs) => {
 
 // ==== Google Drive cache (lyrics) ====
 const isNonEmpty = (value) => typeof value === 'string' && value.trim().length > 0;
-const GDRIVE_CACHE_FOLDER = process.env.GDRIVE_CACHED_LYRICS || process.env.GDRIVE_CACHED_MUSIXMATCH || '';
+const GDRIVE_CACHE_FOLDERS = {
+  apple: process.env.GDRIVE_CACHED_TTML || '',
+  musixmatch: process.env.GDRIVE_CACHED_MUSIXMATCH || '',
+  spotify: process.env.GDRIVE_CACHED_SPOTIFY || '',
+  lyricsplus: process.env.GDRIVE_USERTML_JSON || '',
+  default: process.env.GDRIVE_CACHED_LYRICS || process.env.GDRIVE_CACHED_MUSIXMATCH || ''
+};
 const gdriveState = { accessToken: null, expiresAt: 0 };
+const GDRIVE_SONGS_FILE_ID = process.env.GDRIVE_SONGS_FILE_ID || '';
+const GDRIVE_AUDIO_FOLDER = process.env.GDRIVE_CACHED_AUDIO || '';
+const GDRIVE_SEARCH_FOLDER = process.env.GDRIVE_CACHED_SEARCH || '';
+const LYRICS_CACHE_FOLDER_MODE = (process.env.LYRICS_CACHE_FOLDER_MODE || 'per-source').toLowerCase();
+const AUDIO_CACHE_MODE = (process.env.AUDIO_CACHE_MODE || 'async').toLowerCase(); // async | sync
+const AUDIO_CACHE_FALLBACK_LOSSLESS = process.env.AUDIO_CACHE_FALLBACK_LOSSLESS === 'true';
+const AUDIO_CACHE_WITH_METADATA = process.env.AUDIO_CACHE_WITH_METADATA !== 'false';
+const AUDIO_CACHE_DASH = process.env.AUDIO_CACHE_DASH === 'true';
+const AUDIO_CACHE_READ = process.env.AUDIO_CACHE_READ !== 'false';
 const LYRICS_CACHE_DEBUG = process.env.LYRICS_CACHE_DEBUG === 'true';
+const AUDIO_CACHE_DEBUG = process.env.AUDIO_CACHE_DEBUG === 'true' || LYRICS_CACHE_DEBUG;
+const SEARCH_CACHE_DEBUG = process.env.SEARCH_CACHE_DEBUG === 'true' || LYRICS_CACHE_DEBUG;
 
-const hasGDriveConfig = () => (
+const hasGDriveAuth = () => (
   isNonEmpty(process.env.AUTH_KEY_CLIENT_ID) &&
   isNonEmpty(process.env.AUTH_KEY_CLIENT_SECRET) &&
-  isNonEmpty(process.env.AUTH_KEY_REFRESH_TOKEN) &&
-  isNonEmpty(GDRIVE_CACHE_FOLDER)
+  isNonEmpty(process.env.AUTH_KEY_REFRESH_TOKEN)
 );
+
+const hasGDriveFolder = (folderId) => isNonEmpty(folderId);
+
+const normalizeSourceKey = (raw) => {
+  const v = (raw || '').toString().toLowerCase();
+  if (!v) return '';
+  if (v.includes('apple')) return 'apple';
+  if (v.includes('musixmatch')) return 'musixmatch';
+  if (v.includes('spotify')) return 'spotify';
+  if (v.includes('lyrics')) return 'lyricsplus';
+  return v;
+};
+
+const getFolderForSource = (rawSource) => {
+  if (LYRICS_CACHE_FOLDER_MODE === 'single' && GDRIVE_CACHE_FOLDERS.default) {
+    return GDRIVE_CACHE_FOLDERS.default;
+  }
+  const key = normalizeSourceKey(rawSource);
+  return GDRIVE_CACHE_FOLDERS[key] || GDRIVE_CACHE_FOLDERS.default || '';
+};
+
+const getCandidateFoldersForSources = (sources) => {
+  if (LYRICS_CACHE_FOLDER_MODE === 'single' && GDRIVE_CACHE_FOLDERS.default) {
+    return [GDRIVE_CACHE_FOLDERS.default];
+  }
+  const set = new Set();
+  (sources || []).forEach(s => {
+    const folder = getFolderForSource(s);
+    if (folder) set.add(folder);
+  });
+  if (set.size === 0 && GDRIVE_CACHE_FOLDERS.default) {
+    set.add(GDRIVE_CACHE_FOLDERS.default);
+  }
+  return Array.from(set);
+};
 
 async function getGDriveAccessToken() {
   if (gdriveState.accessToken && gdriveState.expiresAt > Date.now() + 10_000) {
@@ -123,7 +174,7 @@ async function getGDriveAccessToken() {
   return gdriveState.accessToken;
 }
 
-async function gdriveRequest(method, url, data, headers = {}) {
+async function gdriveRequest(method, url, data, headers = {}, extraConfig = {}) {
   const token = await getGDriveAccessToken();
   return axios({
     method,
@@ -132,7 +183,8 @@ async function gdriveRequest(method, url, data, headers = {}) {
     headers: {
       Authorization: `Bearer ${token}`,
       ...headers
-    }
+    },
+    ...extraConfig
   });
 }
 
@@ -141,78 +193,211 @@ function buildLyricsCacheFileName(cacheKey) {
   return `lyrics_${hash}.json`;
 }
 
-async function findGDriveFileByName(fileName) {
-  const q = `name = '${fileName}' and '${GDRIVE_CACHE_FOLDER}' in parents and trashed = false`;
-  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`;
+async function findGDriveFileByName(fileName, folderId) {
+  const q = `name = '${fileName}' and '${folderId}' in parents and trashed = false`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`;
   const resp = await gdriveRequest('GET', url, null);
   const files = resp.data?.files || [];
   return files[0] || null;
 }
 
+async function findGDriveFileByQuery(query) {
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,size)&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=5`;
+  const resp = await gdriveRequest('GET', url, null);
+  const files = resp.data?.files || [];
+  return files;
+}
+
 async function downloadGDriveFile(fileId) {
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
   const resp = await gdriveRequest('GET', url, null, { 'Accept': 'application/json' });
   return resp.data;
 }
 
-async function createGDriveFile(fileName) {
-  const url = 'https://www.googleapis.com/drive/v3/files';
-  const metadata = { name: fileName, parents: [GDRIVE_CACHE_FOLDER] };
+async function streamGDriveFile(fileId, rangeHeader) {
+  const token = await getGDriveAccessToken();
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+  const headers = {
+    Authorization: `Bearer ${token}`
+  };
+  if (rangeHeader) headers.Range = rangeHeader;
+  return axios({
+    method: 'GET',
+    url,
+    headers,
+    responseType: 'stream',
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+}
+
+async function createGDriveFile(fileName, folderId, mimeType = '') {
+  const url = 'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true';
+  const metadata = { name: fileName, parents: [folderId] };
+  if (mimeType) metadata.mimeType = mimeType;
   const resp = await gdriveRequest('POST', url, metadata, { 'Content-Type': 'application/json' });
   return resp.data?.id;
 }
 
-async function updateGDriveFile(fileId, content) {
-  const url = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
-  await gdriveRequest('PATCH', url, content, { 'Content-Type': 'application/json' });
+async function updateGDriveFile(fileId, content, contentType = 'application/json') {
+  const url = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true`;
+  await gdriveRequest(
+    'PATCH',
+    url,
+    content,
+    { 'Content-Type': contentType },
+    { maxBodyLength: Infinity, maxContentLength: Infinity }
+  );
 }
 
-async function loadLyricsCacheFromGDrive(cacheKey) {
-  if (!hasGDriveConfig()) {
+async function loadLyricsCacheFromGDrive(cacheKey, sources) {
+  if (!hasGDriveAuth()) {
     if (LYRICS_CACHE_DEBUG) {
-      console.log('[lyrics-cache] GDrive config missing, skipping read');
+      console.log('[lyrics-cache] GDrive auth missing, skipping read');
     }
     return null;
   }
   const fileName = buildLyricsCacheFileName(cacheKey);
-  const file = await findGDriveFileByName(fileName);
-  if (!file?.id) {
+  const folders = getCandidateFoldersForSources(sources);
+  if (folders.length === 0) {
     if (LYRICS_CACHE_DEBUG) {
-      console.log('[lyrics-cache] GDrive MISS:', fileName);
+      console.log('[lyrics-cache] No GDrive folders configured, skipping read');
     }
     return null;
   }
-  const content = await downloadGDriveFile(file.id);
-  if (LYRICS_CACHE_DEBUG) {
-    console.log('[lyrics-cache] GDrive HIT:', fileName, 'id:', file.id);
-  }
-  if (typeof content === 'string') {
+
+  for (const folderId of folders) {
     try {
-      return JSON.parse(content);
-    } catch {
+      const file = await findGDriveFileByName(fileName, folderId);
+      if (!file?.id) {
+        if (LYRICS_CACHE_DEBUG) {
+          console.log('[lyrics-cache] GDrive MISS:', fileName, 'folder:', folderId);
+        }
+        continue;
+      }
+      const content = await downloadGDriveFile(file.id);
+      if (LYRICS_CACHE_DEBUG) {
+        console.log('[lyrics-cache] GDrive HIT:', fileName, 'id:', file.id, 'folder:', folderId);
+      }
+      if (typeof content === 'string') {
+        try {
+          return JSON.parse(content);
+        } catch {
+          return content;
+        }
+      }
       return content;
+    } catch (e) {
+      if (LYRICS_CACHE_DEBUG) {
+        console.log('[lyrics-cache] GDrive read error:', e.message);
+      }
     }
   }
-  return content;
+
+  return null;
 }
 
-async function saveLyricsCacheToGDrive(cacheKey, payload) {
-  if (!hasGDriveConfig()) {
+async function saveLyricsCacheToGDrive(cacheKey, payload, sourceHint) {
+  if (!hasGDriveAuth()) {
     if (LYRICS_CACHE_DEBUG) {
-      console.log('[lyrics-cache] GDrive config missing, skipping save');
+      console.log('[lyrics-cache] GDrive auth missing, skipping save');
+    }
+    return;
+  }
+  const folderId = getFolderForSource(sourceHint);
+  if (!hasGDriveFolder(folderId)) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] GDrive folder missing for source:', sourceHint);
     }
     return;
   }
   const fileName = buildLyricsCacheFileName(cacheKey);
-  const file = await findGDriveFileByName(fileName);
+  const file = await findGDriveFileByName(fileName, folderId);
   const content = JSON.stringify(payload);
 
-  const fileId = file?.id || await createGDriveFile(fileName);
+  const fileId = file?.id || await createGDriveFile(fileName, folderId, 'application/json');
   if (!fileId) throw new Error('Failed to create cache file in Google Drive');
-  await updateGDriveFile(fileId, content);
+  await updateGDriveFile(fileId, content, 'application/json');
   if (LYRICS_CACHE_DEBUG) {
-    console.log('[lyrics-cache] GDrive SAVE:', fileName, 'id:', fileId, file?.id ? '(update)' : '(create)');
+    console.log('[lyrics-cache] GDrive SAVE:', fileName, 'id:', fileId, file?.id ? '(update)' : '(create)', 'folder:', folderId);
   }
+}
+
+function extractSourceFromPayload(payload) {
+  const candidates = [
+    payload?.metadata?.source,
+    payload?.data?.metadata?.source,
+    payload?.result?.metadata?.source,
+    payload?.data?.result?.metadata?.source,
+    payload?.source
+  ].filter(Boolean);
+
+  for (const s of candidates) {
+    const norm = normalizeSourceKey(s);
+    if (norm) return norm;
+  }
+  return '';
+}
+
+async function loadSongListFromGDrive() {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_SONGS_FILE_ID)) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] songList config missing, skipping read');
+    }
+    return [];
+  }
+  try {
+    const url = `https://www.googleapis.com/drive/v3/files/${GDRIVE_SONGS_FILE_ID}?alt=media&supportsAllDrives=true`;
+    const resp = await gdriveRequest('GET', url, null, { 'Accept': 'application/json' });
+    const data = resp.data;
+    if (Array.isArray(data)) return data;
+    if (typeof data === 'string') {
+      try {
+        const parsed = JSON.parse(data);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  } catch (e) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] songList read error:', e.message);
+    }
+    return [];
+  }
+}
+
+async function saveSongListToGDrive(list) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_SONGS_FILE_ID)) return;
+  const content = JSON.stringify(list);
+  await updateGDriveFile(GDRIVE_SONGS_FILE_ID, content, 'application/json');
+  if (LYRICS_CACHE_DEBUG) {
+    console.log('[lyrics-cache] songList updated:', list.length);
+  }
+}
+
+async function updateSongListEntry(entry) {
+  if (!entry?.title || !entry?.artist) return;
+  const list = await loadSongListFromGDrive();
+  const norm = (v) => (v || '').toString().toLowerCase().trim();
+  const key = `${norm(entry.title)}|${norm(entry.artist)}|${norm(entry.album || '')}`;
+  const now = new Date().toISOString();
+
+  let updated = false;
+  const next = list.map(item => {
+    const itemKey = `${norm(item.title)}|${norm(item.artist)}|${norm(item.album || '')}`;
+    if (itemKey === key) {
+      updated = true;
+      return { ...item, ...entry, updatedAt: now };
+    }
+    return item;
+  });
+
+  if (!updated) {
+    next.push({ ...entry, updatedAt: now });
+  }
+
+  await saveSongListToGDrive(next);
 }
 const FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
@@ -482,6 +667,360 @@ function inferAudioExtension(url, usedQuality) {
   } catch (e) {}
   if (usedQuality && usedQuality.includes('LOSSLESS')) return 'flac';
   return 'm4a';
+}
+
+function inferDashOutputExt(usedQuality, dashManifest = '') {
+  const m = (dashManifest || '').toString().toLowerCase();
+  if (m.includes('flac') || m.includes('audio/flac')) return 'flac';
+  if (m.includes('mp4a') || m.includes('aac') || m.includes('audio/mp4')) return 'm4a';
+  if (m.includes('opus')) return 'opus';
+  if (m.includes('vorbis')) return 'ogg';
+  if (usedQuality && usedQuality.includes('LOSSLESS')) return 'flac';
+  return 'm4a';
+}
+
+function isDashMime(mimeType) {
+  return typeof mimeType === 'string' && mimeType.toLowerCase().includes('dash');
+}
+
+function inferAudioMimeType(ext) {
+  const e = (ext || '').toLowerCase();
+  if (e === 'flac') return 'audio/flac';
+  if (e === 'mp3') return 'audio/mpeg';
+  if (e === 'wav') return 'audio/wav';
+  if (e === 'm4a' || e === 'mp4') return 'audio/mp4';
+  if (e === 'aac') return 'audio/aac';
+  return 'application/octet-stream';
+}
+
+function buildAudioFileName(id, track, usedQuality, ext, nameHint = {}) {
+  const hintedTitle = (nameHint?.title || nameHint?.track || '').toString().trim();
+  const hintedArtist = (nameHint?.artist || '').toString().trim();
+  const title = hintedTitle || track?.title || track?.name || track?.trackTitle || `track-${id}`;
+  const artist = hintedArtist || getArtistString(track);
+  const baseName = sanitizeFilename(`${artist ? artist + ' - ' : ''}${title}`);
+  const qualityTag = usedQuality ? ` [${usedQuality}]` : '';
+  const suffix = ` (${id})`;
+  const safeBase = baseName || `track-${id}`;
+  return `${safeBase}${qualityTag}${suffix}.${ext || 'm4a'}`;
+}
+
+function parseQualityFromFileName(name) {
+  if (!name) return '';
+  const match = name.match(/\[([A-Z_]+)\]/);
+  return match ? match[1] : '';
+}
+
+function getQualityFallbackList(requestedQuality) {
+  const q = (requestedQuality || '').toUpperCase().trim();
+  const qualityFallback = {
+    "HI_RES_LOSSLESS": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+    "LOSSLESS": ["LOSSLESS", "HIGH", "LOW"],
+    "HIGH": ["HIGH", "LOSSLESS", "LOW"],
+    "LOW": ["LOW", "HIGH", "LOSSLESS"]
+  };
+  return qualityFallback[q] || (q ? [q] : ["LOSSLESS", "HIGH", "LOW"]);
+}
+
+async function findCachedAudioFile({ id, requestedQuality }) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_AUDIO_FOLDER) || !AUDIO_CACHE_READ) return null;
+  const qualitiesToTry = getQualityFallbackList(requestedQuality);
+  for (const quality of qualitiesToTry) {
+    const query = [
+      `name contains '(${id})'`,
+      `name contains '[${quality}]'`,
+      `'${GDRIVE_AUDIO_FOLDER}' in parents`,
+      'trashed = false'
+    ].join(' and ');
+    try {
+      const files = await findGDriveFileByQuery(query);
+      if (files && files.length > 0) {
+        return { file: files[0], quality };
+      }
+    } catch (e) {
+      if (AUDIO_CACHE_DEBUG) {
+        console.log('[audio-cache] query failed:', e.message);
+      }
+    }
+  }
+
+  // Fallback: buscar solo por id (por si el tag de calidad no coincide)
+  const fallbackQuery = [
+    `name contains '(${id})'`,
+    `'${GDRIVE_AUDIO_FOLDER}' in parents`,
+    'trashed = false'
+  ].join(' and ');
+  try {
+    const files = await findGDriveFileByQuery(fallbackQuery);
+    if (files && files.length > 0) {
+      const file = files[0];
+      const inferredQuality = parseQualityFromFileName(file.name);
+      return { file, quality: inferredQuality || requestedQuality };
+    }
+  } catch (e) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] fallback query failed:', e.message);
+    }
+  }
+
+  return null;
+}
+
+function extractTrackMetadata(track, nameHint = {}) {
+  const hintedTitle = (nameHint?.title || nameHint?.track || '').toString().trim();
+  const hintedArtist = (nameHint?.artist || '').toString().trim();
+  const hintedAlbum = (nameHint?.album || '').toString().trim();
+
+  const title = hintedTitle || track?.title || track?.name || track?.trackTitle || '';
+  const artist = hintedArtist || getArtistString(track);
+  const albumTitle = hintedAlbum || track?.album?.title || track?.albumTitle || '';
+  const trackNumber = track?.trackNumber || track?.trackNumberInAlbum || '';
+  const discNumber = track?.volumeNumber || track?.discNumber || '';
+  const isrc = track?.isrc || track?.externalIds?.isrc || '';
+  const releaseDateRaw = track?.streamStartDate || track?.releaseDate || '';
+  const releaseYear = releaseDateRaw ? new Date(releaseDateRaw).getFullYear() : '';
+  const coverUrl = buildCoverUrlFromTrack(track, 1280);
+
+  return { title, artist, albumTitle, trackNumber, discNumber, isrc, releaseYear, coverUrl };
+}
+
+function buildSearchCacheFileName(cacheKey) {
+  const hash = crypto.createHash('sha1').update(cacheKey).digest('hex');
+  return `search_${hash}.json`;
+}
+
+async function loadSearchCacheFromGDrive(cacheKey) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_SEARCH_FOLDER)) {
+    if (SEARCH_CACHE_DEBUG) {
+      console.log('[search-cache] GDrive config missing, skipping read');
+    }
+    return null;
+  }
+  const fileName = buildSearchCacheFileName(cacheKey);
+  try {
+    const file = await findGDriveFileByName(fileName, GDRIVE_SEARCH_FOLDER);
+    if (!file?.id) {
+      if (SEARCH_CACHE_DEBUG) {
+        console.log('[search-cache] GDrive MISS:', fileName);
+      }
+      return null;
+    }
+    const content = await downloadGDriveFile(file.id);
+    if (SEARCH_CACHE_DEBUG) {
+      console.log('[search-cache] GDrive HIT:', fileName, 'id:', file.id);
+    }
+    if (typeof content === 'string') {
+      try {
+        return JSON.parse(content);
+      } catch {
+        return content;
+      }
+    }
+    return content;
+  } catch (e) {
+    if (SEARCH_CACHE_DEBUG) {
+      console.log('[search-cache] GDrive read error:', e.message);
+    }
+    return null;
+  }
+}
+
+async function saveSearchCacheToGDrive(cacheKey, payload) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_SEARCH_FOLDER)) {
+    if (SEARCH_CACHE_DEBUG) {
+      console.log('[search-cache] GDrive config missing, skipping save');
+    }
+    return;
+  }
+  const fileName = buildSearchCacheFileName(cacheKey);
+  const content = JSON.stringify(payload);
+  try {
+    const file = await findGDriveFileByName(fileName, GDRIVE_SEARCH_FOLDER);
+    const fileId = file?.id || await createGDriveFile(fileName, GDRIVE_SEARCH_FOLDER, 'application/json');
+    if (!fileId) throw new Error('Failed to create search cache file in Google Drive');
+    await updateGDriveFile(fileId, content, 'application/json');
+    if (SEARCH_CACHE_DEBUG) {
+      console.log('[search-cache] GDrive SAVE:', fileName, 'id:', fileId, file?.id ? '(update)' : '(create)');
+    }
+  } catch (e) {
+    console.warn('[search-cache] save failed:', e.message);
+  }
+}
+
+const audioCacheInFlight = new Set();
+
+async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, dashManifest, manifestMimeType }) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_AUDIO_FOLDER)) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] GDrive config missing, skipping audio cache');
+    }
+    return false;
+  }
+
+  const dashEnabled = AUDIO_CACHE_DASH
+    && isDashMime(manifestMimeType)
+    && typeof dashManifest === 'string'
+    && dashManifest.trim().length > 0;
+
+  if (!streamUrl && !dashEnabled) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] Missing stream URL, skipping audio cache');
+    }
+    return false;
+  }
+
+  const inputExt = streamUrl ? inferAudioExtension(streamUrl, usedQuality) : 'mpd';
+  const outputExt = dashEnabled
+    ? inferDashOutputExt(usedQuality, dashManifest)
+    : ((AUDIO_CACHE_WITH_METADATA && ffmpegPath)
+      ? (inputExt === 'flac' ? 'flac' : (inputExt === 'mp3' ? 'mp3' : 'm4a'))
+      : inputExt);
+  const fileName = buildAudioFileName(id, track, usedQuality, outputExt, nameHint);
+  if (audioCacheInFlight.has(fileName)) {
+    return false;
+  }
+  audioCacheInFlight.add(fileName);
+
+  try {
+    const existing = await findGDriveFileByName(fileName, GDRIVE_AUDIO_FOLDER);
+    if (existing?.id) {
+      if (AUDIO_CACHE_DEBUG) {
+        console.log('[audio-cache] HIT:', fileName, 'id:', existing.id);
+      }
+      return true;
+    }
+
+    const tmpDir = os.tmpdir();
+    const tempPath = path.join(tmpDir, `yupify-audio-${id}-${Date.now()}-in.${inputExt || 'm4a'}`);
+    const outputPath = path.join(tmpDir, `yupify-audio-${id}-${Date.now()}-out.${outputExt || 'm4a'}`);
+    const meta = extractTrackMetadata(track, nameHint);
+    const coverPath = meta.coverUrl ? path.join(tmpDir, `yupify-audio-${id}-${Date.now()}-cover.jpg`) : null;
+
+    if (dashEnabled) {
+      if (AUDIO_CACHE_DEBUG) {
+        console.log('[audio-cache] DASH:', fileName);
+      }
+      if (!ffmpegPath) {
+        if (AUDIO_CACHE_DEBUG) {
+          console.log('[audio-cache] FFmpeg missing, cannot cache DASH');
+        }
+        return false;
+      }
+      fs.writeFileSync(tempPath, dashManifest);
+      if (AUDIO_CACHE_WITH_METADATA && meta.coverUrl) {
+        await downloadToFile(meta.coverUrl, coverPath);
+      }
+
+      const args = [
+        '-y',
+        '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+        '-i', tempPath
+      ];
+
+      if (AUDIO_CACHE_WITH_METADATA && coverPath) {
+        args.push('-i', coverPath, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
+        args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
+      } else {
+        args.push('-map', '0:a');
+      }
+      args.push('-c', 'copy');
+
+      if (AUDIO_CACHE_WITH_METADATA) {
+        if (outputExt === 'mp3') {
+          args.push('-id3v2_version', '3');
+        }
+        if (meta.title) args.push('-metadata', `title=${meta.title}`);
+        if (meta.artist) args.push('-metadata', `artist=${meta.artist}`);
+        if (meta.albumTitle) args.push('-metadata', `album=${meta.albumTitle}`);
+        if (meta.trackNumber) args.push('-metadata', `track=${meta.trackNumber}`);
+        if (meta.discNumber) args.push('-metadata', `disc=${meta.discNumber}`);
+        if (meta.releaseYear) args.push('-metadata', `date=${meta.releaseYear}`);
+        if (meta.isrc) args.push('-metadata', `isrc=${meta.isrc}`);
+      }
+
+      args.push(outputPath);
+      await runFfmpeg(args);
+
+      const mimeType = inferAudioMimeType(outputExt);
+      const fileId = await createGDriveFile(fileName, GDRIVE_AUDIO_FOLDER, mimeType);
+      if (!fileId) throw new Error('Failed to create audio file in Google Drive');
+
+      await updateGDriveFile(fileId, fs.createReadStream(outputPath), mimeType);
+
+      if (AUDIO_CACHE_DEBUG) {
+        console.log('[audio-cache] SAVE:', fileName, 'id:', fileId);
+      }
+
+      try { fs.unlinkSync(tempPath); } catch {}
+      try { fs.unlinkSync(outputPath); } catch {}
+      try { if (coverPath) fs.unlinkSync(coverPath); } catch {}
+      return true;
+    }
+
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] DOWNLOAD:', fileName);
+    }
+
+    await downloadToFile(streamUrl, tempPath);
+    if (meta.coverUrl) {
+      await downloadToFile(meta.coverUrl, coverPath);
+    }
+
+    let uploadPath = tempPath;
+    let uploadExt = inputExt;
+    if (AUDIO_CACHE_WITH_METADATA && ffmpegPath) {
+      const args = ['-y', '-i', tempPath];
+      if (coverPath) {
+        args.push('-i', coverPath, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
+        args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
+      } else {
+        args.push('-map', '0:a');
+      }
+      args.push('-c', 'copy');
+
+      if (outputExt === 'mp3') {
+        args.push('-id3v2_version', '3');
+      }
+      if (meta.title) args.push('-metadata', `title=${meta.title}`);
+      if (meta.artist) args.push('-metadata', `artist=${meta.artist}`);
+      if (meta.albumTitle) args.push('-metadata', `album=${meta.albumTitle}`);
+      if (meta.trackNumber) args.push('-metadata', `track=${meta.trackNumber}`);
+      if (meta.discNumber) args.push('-metadata', `disc=${meta.discNumber}`);
+      if (meta.releaseYear) args.push('-metadata', `date=${meta.releaseYear}`);
+      if (meta.isrc) args.push('-metadata', `isrc=${meta.isrc}`);
+
+      args.push(outputPath);
+      await runFfmpeg(args);
+      uploadPath = outputPath;
+      uploadExt = outputExt;
+    }
+
+    const mimeType = inferAudioMimeType(uploadExt);
+    const fileId = await createGDriveFile(fileName, GDRIVE_AUDIO_FOLDER, mimeType);
+    if (!fileId) throw new Error('Failed to create audio file in Google Drive');
+
+    await updateGDriveFile(fileId, fs.createReadStream(uploadPath), mimeType);
+
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] SAVE:', fileName, 'id:', fileId);
+    }
+
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {}
+    try {
+      if (uploadPath !== tempPath) fs.unlinkSync(uploadPath);
+    } catch {}
+    try {
+      if (coverPath) fs.unlinkSync(coverPath);
+    } catch {}
+    return true;
+  } catch (err) {
+    console.warn('[audio-cache] failed:', err.message);
+    return false;
+  } finally {
+    audioCacheInFlight.delete(fileName);
+  }
 }
 
 async function downloadToFile(url, destPath) {
@@ -1022,6 +1561,12 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/track/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const nameHint = {
+      title: req.query.title,
+      track: req.query.track,
+      artist: req.query.artist,
+      album: req.query.album
+    };
 
     // Calidad solicitada
     const qRaw = (req.query.quality || "LOSSLESS").toUpperCase().trim();
@@ -1109,7 +1654,7 @@ app.get('/api/track/:id', async (req, res) => {
       
       // Para HI_RES DASH: el manifest completo se envía tal cual
       // El frontend usará Shaka Player para reproducirlo
-      if (respData.manifestMimeType === 'application/dash+xml') {
+      if (isDashMime(respData.manifestMimeType)) {
         console.log('✔️ HI_RES DASH manifest - será procesado por Shaka Player frontend');
         // No modificar: el frontend necesita el manifest completo
       }
@@ -1120,11 +1665,73 @@ app.get('/api/track/:id', async (req, res) => {
         usedQuality: usedQuality
       };
       setCache(cacheKey, payload, CACHE_TTL.track);
+      const runAudioCache = async () => {
+        let cacheUrl = streamUrl || respData.url || null;
+        let cacheQuality = usedQuality;
+        const dashManifest = (isDashMime(respData.manifestMimeType) && typeof respData.manifest === 'string')
+          ? respData.manifest
+          : null;
+
+        let cached = await cacheTrackAudio({
+          id,
+          track: respData,
+          streamUrl: cacheUrl,
+          usedQuality: cacheQuality,
+          nameHint,
+          dashManifest,
+          manifestMimeType: respData.manifestMimeType
+        });
+
+        if (!cached && !cacheUrl && AUDIO_CACHE_FALLBACK_LOSSLESS) {
+          const fallback = await resolveTrackForDownload(id, "LOSSLESS");
+          if (fallback?.streamUrl) {
+            cacheUrl = fallback.streamUrl;
+            cacheQuality = fallback.usedQuality;
+            await cacheTrackAudio({
+              id,
+              track: fallback.respData || respData,
+              streamUrl: cacheUrl,
+              usedQuality: cacheQuality,
+              nameHint
+            });
+          }
+        }
+      };
+      if (AUDIO_CACHE_MODE === 'sync') {
+        await runAudioCache();
+      } else {
+        runAudioCache().catch(err => console.warn('[audio-cache] background error:', err.message));
+      }
       return res.json(payload);
 
   } catch (error) {
     console.error("❌ Error en TRACK:", error.message);
     res.status(500).json({ error: "Error interno al obtener track" });
+  }
+});
+
+// Servir audio cacheado desde Google Drive
+app.get('/api/audio/file/:fileId', async (req, res) => {
+  try {
+    const { fileId } = req.params;
+    if (!hasGDriveAuth()) {
+      return res.status(500).json({ error: 'GDrive auth missing' });
+    }
+    const range = req.headers.range;
+    const resp = await streamGDriveFile(fileId, range);
+    if (resp.status >= 400) {
+      return res.status(resp.status).json({ error: 'No se pudo obtener audio cacheado' });
+    }
+    const headers = resp.headers || {};
+    if (headers['content-type']) res.setHeader('Content-Type', headers['content-type']);
+    if (headers['content-length']) res.setHeader('Content-Length', headers['content-length']);
+    if (headers['content-range']) res.setHeader('Content-Range', headers['content-range']);
+    if (headers['accept-ranges']) res.setHeader('Accept-Ranges', headers['accept-ranges']);
+    res.status(resp.status);
+    resp.data.pipe(res);
+  } catch (error) {
+    console.error('Error en /api/audio/file:', error.message);
+    res.status(500).json({ error: 'Error interno al obtener audio cacheado' });
   }
 });
 
@@ -1278,6 +1885,12 @@ app.get('/api/search', async (req, res) => {
     const cached = getCache(cacheKey);
     if (cached) return res.json(cached);
 
+    const gdriveCached = await loadSearchCacheFromGDrive(cacheKey);
+    if (gdriveCached) {
+      setCache(cacheKey, gdriveCached, CACHE_TTL.search);
+      return res.json(gdriveCached);
+    }
+
     if (envSearch) {
       const url = `${envSearch}/search/?${searchQuery}&li=${limit}&offset=${offset}`;
       console.log('-> Search via SEARCH_API:', url);
@@ -1294,6 +1907,7 @@ app.get('/api/search', async (req, res) => {
       }
 
       setCache(cacheKey, payload, CACHE_TTL.search);
+      saveSearchCacheToGDrive(cacheKey, payload);
       return res.json(payload);
     }
 
@@ -1307,6 +1921,7 @@ app.get('/api/search', async (req, res) => {
       const items = fastRemote?.data?.items ?? fastRemote?.items ?? [];
       const payload = { version: fastRemote.version || '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: items.length, items } };
       setCache(cacheKey, payload, CACHE_TTL.search);
+      saveSearchCacheToGDrive(cacheKey, payload);
       return res.json(payload);
     }
 
@@ -1325,6 +1940,7 @@ app.get('/api/search', async (req, res) => {
       const remote = success.data;
       const payload = { version: remote.version || '2.4', data: { limit: remote.data.limit ?? Number(limit), offset: (remote.data.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.data.totalNumberOfItems ?? ((remote.data.total ?? remote.data.items.length) || 0), items: remote.data.items } };
       setCache(cacheKey, payload, CACHE_TTL.search);
+      saveSearchCacheToGDrive(cacheKey, payload);
       return res.json(payload);
     }
 
@@ -1345,6 +1961,7 @@ app.get('/api/search', async (req, res) => {
 
     const payload = { version: '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: uniqueItems.length, items: uniqueItems } };
     setCache(cacheKey, payload, CACHE_TTL.search);
+    saveSearchCacheToGDrive(cacheKey, payload);
     return res.json(payload);
     } catch (error) {
       console.error('Error en búsqueda (combinada):', error?.message || error);
@@ -1514,12 +2131,13 @@ app.get('/api/lyrics', async (req, res) => {
     const providerKey = providerList.join('|');
 
     const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${baseSource}|${providerKey}`;
+    const gdriveCacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}`;
     const cached = getCache(cacheKey);
     if (cached) {
       return res.json(cached);
     }
 
-    const gdriveCached = await loadLyricsCacheFromGDrive(cacheKey);
+    const gdriveCached = await loadLyricsCacheFromGDrive(gdriveCacheKey, sourcesList);
     if (gdriveCached) {
       setCache(cacheKey, gdriveCached, CACHE_TTL.lyrics);
       return res.json(gdriveCached);
@@ -1623,12 +2241,25 @@ app.get('/api/lyrics', async (req, res) => {
           if (hasLyrics) {
             setCache(cacheKey, payload, CACHE_TTL.lyrics);
             if (LYRICS_CACHE_DEBUG) {
-              console.log('[lyrics-cache] SAVE attempt:', cacheKey);
+              console.log('[lyrics-cache] SAVE attempt:', gdriveCacheKey);
             }
+            const payloadSource = extractSourceFromPayload(payload);
+            const inferredSource = explicitSingleSource ? sourcesList[0] : (payloadSource || '');
             try {
-              await saveLyricsCacheToGDrive(cacheKey, payload);
+              await saveLyricsCacheToGDrive(gdriveCacheKey, payload, inferredSource);
             } catch (e) {
               console.warn('GDrive cache failed:', e.message);
+            }
+            try {
+              await updateSongListEntry({
+                title: finalTitle,
+                artist,
+                album: album || '',
+                duration: duration || '',
+                source: explicitSingleSource ? sourcesList[0] : (payloadSource || baseSource)
+              });
+            } catch (e) {
+              console.warn('songList update failed:', e.message);
             }
             return res.json(payload);
           } else if (LYRICS_CACHE_DEBUG) {
