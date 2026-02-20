@@ -1622,12 +1622,18 @@ app.get('/api/lyrics', async (req, res) => {
 
           if (hasLyrics) {
             setCache(cacheKey, payload, CACHE_TTL.lyrics);
+            if (LYRICS_CACHE_DEBUG) {
+              console.log('[lyrics-cache] SAVE attempt:', cacheKey);
+            }
             try {
               await saveLyricsCacheToGDrive(cacheKey, payload);
             } catch (e) {
               console.warn('GDrive cache failed:', e.message);
             }
             return res.json(payload);
+          } else if (LYRICS_CACHE_DEBUG) {
+            const keys = payload && typeof payload === 'object' ? Object.keys(payload) : [];
+            console.log('[lyrics-cache] No lyrics in response. Keys:', keys);
           }
 
           lastError = new Error('Lyrics empty');
