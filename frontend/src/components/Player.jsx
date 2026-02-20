@@ -778,6 +778,17 @@ const Player = ({
           z-index: -1;
         }
 
+        .lyrics-line.is-active.is-timed {
+          color: rgba(255,255,255,0.5);
+          background: transparent;
+          text-shadow: none;
+          backdrop-filter: none;
+        }
+
+        .lyrics-line.is-active.is-timed::before {
+          content: none;
+        }
+
         .lyrics-syllable {
           display: inline-block;
           margin-right: 4px;
@@ -918,12 +929,13 @@ const Player = ({
                         {lyricsStructured.map((line, li) => {
                           const isActiveLine = li === activeLineIndex;
                           const hasSyllabus = line.syllabus && line.syllabus.length > 0;
+                          const timedClass = hasSyllabus ? 'is-timed' : 'is-plain';
                           const renderTime = smoothTime + 0.02;
                           return (
                             <div
                               key={line.id}
                               ref={(el) => (linesRef.current[li] = el)}
-                              className={`lyrics-line ${isActiveLine ? 'is-active' : ''}`}
+                              className={`lyrics-line ${isActiveLine ? 'is-active' : ''} ${timedClass}`}
                               onClick={() => {
                                 if (Number.isFinite(line.time)) handleSyllableClick(line.time);
                               }}
