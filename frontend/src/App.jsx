@@ -864,7 +864,7 @@ const App = () => {
                     currentTrackId={currentTrack?.id}
                   />
                 ) : (
-                  <p className="text-gray-400">No hay historial todavÃ­a.</p>
+                  <p className="text-gray-400">No hay historial todavía.</p>
                 )}
               </section>
 
@@ -886,7 +886,7 @@ const App = () => {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-gray-400">AÃºn no tienes playlists.</p>
+                    <p className="text-gray-400">Aún no tienes playlists.</p>
                   )}
                 </section>
               )}

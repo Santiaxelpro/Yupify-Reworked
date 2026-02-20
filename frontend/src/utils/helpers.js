@@ -91,7 +91,7 @@ export const getCoverUrl = (track, size = 1280) => {
 };
 
 /**
- * Obtener tÃ­tulo con versiÃ³n si existe (ej: "Slowed")
+ * Obtener título con versión si existe (ej: "Slowed")
  */
 export const getTrackDisplayTitle = (track) => {
   if (!track) return '';
