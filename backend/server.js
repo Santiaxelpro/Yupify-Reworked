@@ -89,6 +89,7 @@ const setCache = (key, value, ttlMs) => {
 const isNonEmpty = (value) => typeof value === 'string' && value.trim().length > 0;
 const GDRIVE_CACHE_FOLDER = process.env.GDRIVE_CACHED_LYRICS || process.env.GDRIVE_CACHED_MUSIXMATCH || '';
 const gdriveState = { accessToken: null, expiresAt: 0 };
+const LYRICS_CACHE_DEBUG = process.env.LYRICS_CACHE_DEBUG === 'true';
 
 const hasGDriveConfig = () => (
   isNonEmpty(process.env.AUTH_KEY_CLIENT_ID) &&
@@ -167,11 +168,24 @@ async function updateGDriveFile(fileId, content) {
 }
 
 async function loadLyricsCacheFromGDrive(cacheKey) {
-  if (!hasGDriveConfig()) return null;
+  if (!hasGDriveConfig()) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] GDrive config missing, skipping read');
+    }
+    return null;
+  }
   const fileName = buildLyricsCacheFileName(cacheKey);
   const file = await findGDriveFileByName(fileName);
-  if (!file?.id) return null;
+  if (!file?.id) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] GDrive MISS:', fileName);
+    }
+    return null;
+  }
   const content = await downloadGDriveFile(file.id);
+  if (LYRICS_CACHE_DEBUG) {
+    console.log('[lyrics-cache] GDrive HIT:', fileName, 'id:', file.id);
+  }
   if (typeof content === 'string') {
     try {
       return JSON.parse(content);
@@ -183,7 +197,12 @@ async function loadLyricsCacheFromGDrive(cacheKey) {
 }
 
 async function saveLyricsCacheToGDrive(cacheKey, payload) {
-  if (!hasGDriveConfig()) return;
+  if (!hasGDriveConfig()) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] GDrive config missing, skipping save');
+    }
+    return;
+  }
   const fileName = buildLyricsCacheFileName(cacheKey);
   const file = await findGDriveFileByName(fileName);
   const content = JSON.stringify(payload);
@@ -191,6 +210,9 @@ async function saveLyricsCacheToGDrive(cacheKey, payload) {
   const fileId = file?.id || await createGDriveFile(fileName);
   if (!fileId) throw new Error('Failed to create cache file in Google Drive');
   await updateGDriveFile(fileId, content);
+  if (LYRICS_CACHE_DEBUG) {
+    console.log('[lyrics-cache] GDrive SAVE:', fileName, 'id:', fileId, file?.id ? '(update)' : '(create)');
+  }
 }
 const FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
