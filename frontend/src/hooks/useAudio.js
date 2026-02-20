@@ -46,6 +46,9 @@ const getAudioElement = () => {
     audio = document.createElement('audio');
     audio.id = 'yupify-audio-player';
     audio.crossOrigin = 'anonymous';
+    audio.preload = 'auto';
+    audio.setAttribute('playsinline', '');
+    audio.setAttribute('webkit-playsinline', '');
     document.body.appendChild(audio);
   }
   return audio;

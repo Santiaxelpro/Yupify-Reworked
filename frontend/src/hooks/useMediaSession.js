@@ -104,7 +104,6 @@ const useMediaSession = ({
     if (typeof navigator === 'undefined') return;
     if (!('mediaSession' in navigator)) return;
 
-    const audio = audioRef?.current;
     const mediaSession = navigator.mediaSession;
 
     const safeSetHandler = (action, handler) => {
@@ -115,6 +114,10 @@ const useMediaSession = ({
       }
     };
 
+    const getAudio = () => (
+      audioRef?.current || (typeof document !== 'undefined' ? document.getElementById('yupify-audio-player') : null)
+    );
+
     safeSetHandler('play', async () => {
       try {
         if (typeof onPlay === 'function') {
@@ -124,7 +127,7 @@ const useMediaSession = ({
           }
           return;
         }
-        await audio?.play();
+        await getAudio()?.play();
       } catch (err) {
         console.warn('MediaSession play failed', err);
       }
@@ -136,7 +139,7 @@ const useMediaSession = ({
           onPause();
           return;
         }
-        audio?.pause();
+        getAudio()?.pause();
       } catch (err) {
         console.warn('MediaSession pause failed', err);
       }
@@ -144,10 +147,10 @@ const useMediaSession = ({
 
     safeSetHandler('stop', () => {
       try {
-        if (audio) {
-          audio.pause();
-          audio.currentTime = 0;
-        }
+        const audio = getAudio();
+        if (!audio) return;
+        audio.pause();
+        audio.currentTime = 0;
       } catch (err) {
         console.warn('MediaSession stop failed', err);
       }
@@ -171,6 +174,7 @@ const useMediaSession = ({
 
     safeSetHandler('seekbackward', (details) => {
       try {
+        const audio = getAudio();
         if (!audio) return;
         const offset = details?.seekOffset ?? 10;
         const base = Number.isFinite(audio.currentTime) ? audio.currentTime : timeRef.current;
@@ -182,6 +186,7 @@ const useMediaSession = ({
 
     safeSetHandler('seekforward', (details) => {
       try {
+        const audio = getAudio();
         if (!audio) return;
         const offset = details?.seekOffset ?? 10;
         const base = Number.isFinite(audio.currentTime) ? audio.currentTime : timeRef.current;
@@ -195,6 +200,7 @@ const useMediaSession = ({
 
     safeSetHandler('seekto', (details) => {
       try {
+        const audio = getAudio();
         if (!audio) return;
         if (!details || !Number.isFinite(details.seekTime)) return;
         if (details.fastSeek && typeof audio.fastSeek === 'function') {
@@ -218,6 +224,33 @@ const useMediaSession = ({
       safeSetHandler('seekto', null);
     };
   }, [audioRef, onNext, onPause, onPlay, onPrevious]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (typeof navigator === 'undefined') return;
+    if (!('mediaSession' in navigator)) return;
+
+    const refresh = () => {
+      try {
+        if (metadata) {
+          navigator.mediaSession.metadata = metadata;
+        }
+        navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+      } catch (err) {
+        // ignore
+      }
+    };
+
+    const handleVisibility = () => refresh();
+    const handleFocus = () => refresh();
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [metadata, isPlaying]);
 };
 
 export default useMediaSession;

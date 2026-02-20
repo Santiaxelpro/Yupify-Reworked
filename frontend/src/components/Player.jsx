@@ -1019,11 +1019,11 @@ const Player = ({
       <div className="fixed bottom-16 md:bottom-0 left-0 right-0 bg-gray-950 border-t border-gray-800 shadow-2xl lg:pl-64">
 
         {/* Info */}
-        <div className="flex items-center gap-4 px-4 pt-3">
+        <div className="flex items-center gap-3 px-3 sm:px-4 pt-3 flex-wrap">
           <img
             src={tidalCover}
             alt={displayTitle || currentTrack.title}
-            className="w-16 h-16 rounded-lg shadow-lg"
+            className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg shadow-lg"
             onError={(e) => (e.target.src = fallbackCover)}
           />
 
@@ -1035,24 +1035,25 @@ const Player = ({
             <span className="text-xs" style={{ color: accent }}>LOSSLESS</span>
           </div>
 
-          <button onClick={onToggleFavorite}>
-            <Heart
-              size={24}
-              className={
-                isFavorite
-                  ? "fill-red-500 text-red-500"
-                  : "text-gray-400 hover:text-white"
-              }
-            />
-          </button>
+          <div className="flex items-center gap-2 sm:gap-3 ml-auto w-full sm:w-auto justify-end">
+            <button onClick={onToggleFavorite}>
+              <Heart
+                className={
+                  isFavorite
+                    ? "fill-red-500 text-red-500 w-5 h-5 sm:w-6 sm:h-6"
+                    : "text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6"
+                }
+              />
+            </button>
 
-          <button className="ml-2" onClick={() => onDownload(currentTrack)}>
-            <Download size={24} className="text-gray-400 hover:text-white" />
-          </button>
+            <button onClick={() => onDownload(currentTrack)}>
+              <Download className="text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6" />
+            </button>
 
-          <button className="ml-2" onClick={openLyrics}>
-            <FileText size={24} className="text-gray-400 hover:text-white" />
-          </button>
+            <button onClick={openLyrics}>
+              <FileText className="text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6" />
+            </button>
+          </div>
         </div>
 
         {/* Barra progreso */}
@@ -1077,34 +1078,36 @@ const Player = ({
         </div>
 
         {/* Controles */}
-        <div className="flex items-center justify-center gap-4 px-4 pb-4">
-          <button onClick={onToggleShuffle}>
-            <Shuffle className={isShuffle ? "text-green-500" : "text-gray-400"} />
-          </button>
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 px-3 sm:px-4 pb-4">
+          <div className="flex items-center justify-center gap-3 sm:gap-4 w-full sm:w-auto">
+            <button onClick={onToggleShuffle}>
+              <Shuffle className={isShuffle ? "text-green-500 w-5 h-5 sm:w-6 sm:h-6" : "text-gray-400 w-5 h-5 sm:w-6 sm:h-6"} />
+            </button>
 
-          <button onClick={onSkipPrevious}>
-            <SkipBack size={32} className="text-gray-400" />
-          </button>
+            <button onClick={onSkipPrevious}>
+              <SkipBack className="text-gray-400 w-7 h-7 sm:w-8 sm:h-8" />
+            </button>
 
-          <button
-            onClick={onTogglePlay}
-            className="rounded-full p-4 hover:opacity-90"
-            style={{ backgroundColor: accent }}
-          >
-            {isPlaying ? <Pause size={28} /> : <Play size={28} />}
-          </button>
+            <button
+              onClick={onTogglePlay}
+              className="rounded-full p-3 sm:p-4 hover:opacity-90"
+              style={{ backgroundColor: accent }}
+            >
+              {isPlaying ? <Pause className="w-6 h-6 sm:w-7 sm:h-7" /> : <Play className="w-6 h-6 sm:w-7 sm:h-7" />}
+            </button>
 
-          <button onClick={onSkipNext}>
-            <SkipForward size={32} className="text-gray-400" />
-          </button>
+            <button onClick={onSkipNext}>
+              <SkipForward className="text-gray-400 w-7 h-7 sm:w-8 sm:h-8" />
+            </button>
 
-          <button onClick={onToggleRepeat}>
-            <Repeat className={isRepeat ? "text-green-500" : "text-gray-400"} />
-          </button>
+            <button onClick={onToggleRepeat}>
+              <Repeat className={isRepeat ? "text-green-500 w-5 h-5 sm:w-6 sm:h-6" : "text-gray-400 w-5 h-5 sm:w-6 sm:h-6"} />
+            </button>
+          </div>
 
-          <div className="flex items-center gap-2 ml-4">
+          <div className="flex items-center gap-2 sm:ml-4 w-full sm:w-auto justify-center sm:justify-start">
             <button onClick={onToggleMute}>
-              {isMuted ? <VolumeX /> : <Volume2 />}
+              {isMuted ? <VolumeX className="w-5 h-5 sm:w-6 sm:h-6" /> : <Volume2 className="w-5 h-5 sm:w-6 sm:h-6" />}
             </button>
 
             <input
@@ -1113,8 +1116,7 @@ const Player = ({
               max="100"
               value={isMuted ? 0 : volume * 100}
               onChange={(e) => onVolumeChange(Number(e.target.value))}
-              className="yupify-range"
-              style={{ width: 120 }}
+              className="yupify-range w-24 sm:w-32"
             />
           </div>
         </div>
