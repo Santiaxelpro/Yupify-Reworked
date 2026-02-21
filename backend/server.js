@@ -104,6 +104,7 @@ const AUDIO_CACHE_FALLBACK_LOSSLESS = process.env.AUDIO_CACHE_FALLBACK_LOSSLESS 
 const AUDIO_CACHE_WITH_METADATA = process.env.AUDIO_CACHE_WITH_METADATA !== 'false';
 const AUDIO_CACHE_DASH = process.env.AUDIO_CACHE_DASH === 'true';
 const AUDIO_CACHE_READ = process.env.AUDIO_CACHE_READ !== 'false';
+const ONLY_GOOGLE_DRIVE = process.env.ONLY_GOOGLE_DRIVE === 'true';
 const LYRICS_CACHE_DEBUG = process.env.LYRICS_CACHE_DEBUG === 'true';
 const AUDIO_CACHE_DEBUG = process.env.AUDIO_CACHE_DEBUG === 'true' || LYRICS_CACHE_DEBUG;
 const SEARCH_CACHE_DEBUG = process.env.SEARCH_CACHE_DEBUG === 'true' || LYRICS_CACHE_DEBUG;
@@ -1583,6 +1584,34 @@ app.get('/api/track/:id', async (req, res) => {
       return res.json(cached);
     }
 
+    if (AUDIO_CACHE_READ) {
+      const audioCached = await findCachedAudioFile({ id, requestedQuality });
+      if (audioCached?.file?.id) {
+        const audioUrl = `/api/audio/file/${audioCached.file.id}`;
+        const payload = {
+          url: audioUrl,
+          assetPresentation: 'FULL',
+          manifestMimeType: audioCached.file.mimeType || null,
+          requestedQuality,
+          usedQuality: audioCached.quality || requestedQuality,
+          cached: true
+        };
+        if (AUDIO_CACHE_DEBUG) {
+          console.log('[audio-cache] USE:', audioCached.file.name, 'id:', audioCached.file.id);
+        }
+        setCache(cacheKey, payload, CACHE_TTL.track);
+        return res.json(payload);
+      }
+    }
+
+    if (ONLY_GOOGLE_DRIVE) {
+      return res.status(404).json({
+        error: 'ONLY_GOOGLE_DRIVE enabled: audio cache miss',
+        id,
+        requestedQuality
+      });
+    }
+
     console.log(`\n>>> Calidad solicitada: ${qRaw} → intentando: ${requestedQuality}`);
 
     // Orden de fallback: si no encuentra la solicitada, intenta las siguientes
@@ -1890,6 +1919,12 @@ app.get('/api/search', async (req, res) => {
       setCache(cacheKey, gdriveCached, CACHE_TTL.search);
       return res.json(gdriveCached);
     }
+    if (ONLY_GOOGLE_DRIVE) {
+      return res.status(404).json({
+        error: 'ONLY_GOOGLE_DRIVE enabled: search cache miss',
+        cacheKey
+      });
+    }
 
     if (envSearch) {
       const url = `${envSearch}/search/?${searchQuery}&li=${limit}&offset=${offset}`;
@@ -2141,6 +2176,12 @@ app.get('/api/lyrics', async (req, res) => {
     if (gdriveCached) {
       setCache(cacheKey, gdriveCached, CACHE_TTL.lyrics);
       return res.json(gdriveCached);
+    }
+    if (ONLY_GOOGLE_DRIVE) {
+      return res.status(404).json({
+        error: 'ONLY_GOOGLE_DRIVE enabled: lyrics cache miss',
+        cacheKey: gdriveCacheKey
+      });
     }
 
     const buildArtistVariants = (raw) => {
