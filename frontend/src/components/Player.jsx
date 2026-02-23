@@ -58,6 +58,7 @@ const Player = ({
   const [availableSources, setAvailableSources] = useState({});
   const [checkingSources, setCheckingSources] = useState(false);
   const linesRef = React.useRef([]);
+  const combinedLyricsCacheRef = React.useRef(new Map());
   const [activeLineIndex, setActiveLineIndex] = React.useState(-1);
   const [activeSyllableIndex, setActiveSyllableIndex] = React.useState(-1);
   const [smoothTime, setSmoothTime] = React.useState(0);
@@ -75,6 +76,33 @@ const Player = ({
     { id: 'spotify', label: 'Spotify' },
     { id: 'musixmatch-word', label: 'Musixmatch Word' }
   ]), []);
+
+  const getCombinedSources = React.useCallback((payload) => {
+    const raw = payload?.raw ?? payload;
+    if (raw && typeof raw === 'object' && raw._sources && typeof raw._sources === 'object') {
+      return raw._sources;
+    }
+    return null;
+  }, []);
+
+  const buildAvailability = React.useCallback((payload) => {
+    const results = {};
+    const sources = getCombinedSources(payload);
+    lyricsSources.forEach((source) => {
+      if (source.id === 'auto') return;
+      if (sources) {
+        if (source.id === 'musixmatch-word') {
+          results[source.id] = Boolean(sources[source.id] || sources.musixmatch);
+        } else {
+          results[source.id] = Boolean(sources[source.id]);
+        }
+        return;
+      }
+      const sourceName = getLyricsSourceName(payload);
+      results[source.id] = sourceName === source.id;
+    });
+    return results;
+  }, [getCombinedSources, lyricsSources]);
 
   const toMs = (t) => {
     if (t == null) return 0;
@@ -445,22 +473,28 @@ const Player = ({
     setCheckingSources(true);
 
     const run = async () => {
-      const results = {};
-      for (const source of lyricsSources) {
-        if (source.id === 'auto') continue;
-        try {
-          const payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: source.id });
-          const parsed = normalizeLyricsPayload(payload);
-          results[source.id] = !isLyricsEmpty(parsed);
-        } catch (e) {
-          results[source.id] = false;
+      try {
+        const preloaded = preloadedLyrics;
+        const preloadedRaw = preloaded?.raw ?? preloaded;
+        let payload = preloadedRaw;
+        if (!payload) {
+          payload = await api.track.getLyrics(trackTitle, trackArtist);
         }
-        if (cancelled) return;
-      }
 
-      if (!cancelled) {
+        if (cancelled) return;
+        const results = buildAvailability(payload);
         lyricsSourcesCacheRef.current.set(cacheKey, results);
+        combinedLyricsCacheRef.current.set(cacheKey, payload?.raw ?? payload);
         setAvailableSources(results);
+        setCheckingSources(false);
+      } catch (e) {
+        if (cancelled) return;
+        const fallback = {};
+        lyricsSources.forEach((source) => {
+          if (source.id !== 'auto') fallback[source.id] = false;
+        });
+        lyricsSourcesCacheRef.current.set(cacheKey, fallback);
+        setAvailableSources(fallback);
         setCheckingSources(false);
       }
     };
@@ -471,7 +505,7 @@ const Player = ({
       cancelled = true;
       setCheckingSources(false);
     };
-  }, [lyricsOpen, trackKey, trackTitle, trackArtist, lyricsSources]);
+  }, [lyricsOpen, trackKey, trackTitle, trackArtist, lyricsSources, preloadedLyrics, buildAvailability]);
 
   React.useEffect(() => {
     if (!lyricsOpen || !currentTrack) return;
@@ -484,13 +518,31 @@ const Player = ({
       try {
         let payload = null;
         let parsed = null;
+
+        const cachedCombined = combinedLyricsCacheRef.current.get(trackKey);
+        const combinedSources = getCombinedSources(cachedCombined || preloadedLyrics);
+
         if (lyricsSource === 'auto') {
-          payload = preloadedLyrics;
+          if (combinedSources && (combinedSources.apple || combinedSources['apple'])) {
+            payload = combinedSources.apple || combinedSources['apple'];
+          } else {
+            payload = cachedCombined || preloadedLyrics;
+          }
           parsed = normalizeLyricsPayload(payload);
           const sourceName = getLyricsSourceName(payload);
           const fromApple = sourceName.includes('apple');
           if (!payload || isLyricsEmpty(parsed) || !fromApple) {
             payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: 'apple' });
+            parsed = normalizeLyricsPayload(payload);
+          }
+        } else if (combinedSources) {
+          const selected = combinedSources[lyricsSource]
+            || (lyricsSource === 'musixmatch-word' ? combinedSources.musixmatch : null);
+          if (selected) {
+            payload = selected;
+            parsed = normalizeLyricsPayload(payload);
+          } else {
+            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource });
             parsed = normalizeLyricsPayload(payload);
           }
         } else {

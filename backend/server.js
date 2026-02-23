@@ -105,6 +105,7 @@ const AUDIO_CACHE_WITH_METADATA = process.env.AUDIO_CACHE_WITH_METADATA !== 'fal
 const AUDIO_CACHE_DASH = process.env.AUDIO_CACHE_DASH === 'true';
 const AUDIO_CACHE_READ = process.env.AUDIO_CACHE_READ !== 'false';
 const ONLY_GOOGLE_DRIVE = process.env.ONLY_GOOGLE_DRIVE === 'true';
+const AUDIO_CACHE_DASH_USER_AGENT = process.env.AUDIO_CACHE_DASH_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Yupify/1.0';
 const LYRICS_CACHE_DEBUG = process.env.LYRICS_CACHE_DEBUG === 'true';
 const AUDIO_CACHE_DEBUG = process.env.AUDIO_CACHE_DEBUG === 'true' || LYRICS_CACHE_DEBUG;
 const SEARCH_CACHE_DEBUG = process.env.SEARCH_CACHE_DEBUG === 'true' || LYRICS_CACHE_DEBUG;
@@ -126,6 +127,13 @@ const normalizeSourceKey = (raw) => {
   if (v.includes('lyrics')) return 'lyricsplus';
   return v;
 };
+
+const SOURCE_BY_FOLDER = Object.entries(GDRIVE_CACHE_FOLDERS).reduce((acc, [key, value]) => {
+  if (value) acc[value] = key;
+  return acc;
+}, {});
+
+const getSourceForFolder = (folderId) => SOURCE_BY_FOLDER[folderId] || '';
 
 const getFolderForSource = (rawSource) => {
   if (LYRICS_CACHE_FOLDER_MODE === 'single' && GDRIVE_CACHE_FOLDERS.default) {
@@ -297,6 +305,95 @@ async function loadLyricsCacheFromGDrive(cacheKey, sources) {
   return null;
 }
 
+async function loadLyricsCachesFromGDrive(cacheKey, sources) {
+  if (!hasGDriveAuth()) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] GDrive auth missing, skipping read');
+    }
+    return [];
+  }
+  const fileName = buildLyricsCacheFileName(cacheKey);
+  const folders = getCandidateFoldersForSources(sources);
+  if (folders.length === 0) {
+    if (LYRICS_CACHE_DEBUG) {
+      console.log('[lyrics-cache] No GDrive folders configured, skipping read');
+    }
+    return [];
+  }
+
+  const results = [];
+  for (const folderId of folders) {
+    try {
+      const file = await findGDriveFileByName(fileName, folderId);
+      if (!file?.id) {
+        if (LYRICS_CACHE_DEBUG) {
+          console.log('[lyrics-cache] GDrive MISS:', fileName, 'folder:', folderId);
+        }
+        continue;
+      }
+      const content = await downloadGDriveFile(file.id);
+      if (LYRICS_CACHE_DEBUG) {
+        console.log('[lyrics-cache] GDrive HIT:', fileName, 'id:', file.id, 'folder:', folderId);
+      }
+      let payload = content;
+      if (typeof content === 'string') {
+        try {
+          payload = JSON.parse(content);
+        } catch {
+          payload = content;
+        }
+      }
+      const sourceHint = extractSourceFromPayload(payload) || getSourceForFolder(folderId) || '';
+      results.push({ source: sourceHint, payload, folderId, fileId: file.id });
+    } catch (e) {
+      if (LYRICS_CACHE_DEBUG) {
+        console.log('[lyrics-cache] GDrive read error:', e.message);
+      }
+    }
+  }
+
+  return results;
+}
+
+function normalizeLyricsPayloadForOutput(payload) {
+  if (payload == null) return { result: '' };
+  if (Array.isArray(payload)) return { lyrics: payload };
+  if (typeof payload === 'string') return { result: payload };
+  if (typeof payload === 'object') return payload;
+  return { result: String(payload) };
+}
+
+function buildCombinedLyricsPayload(caches, preferredSources = []) {
+  if (!Array.isArray(caches) || caches.length === 0) return null;
+  const preferredOrder = Array.isArray(preferredSources) ? preferredSources : [];
+  let preferred = null;
+  for (const src of preferredOrder) {
+    preferred = caches.find(c => normalizeSourceKey(c.source) === normalizeSourceKey(src));
+    if (preferred) break;
+  }
+  if (!preferred) preferred = caches[0];
+
+  const base = normalizeLyricsPayloadForOutput(preferred.payload);
+  const sourcesMap = {};
+  const sourcesList = [];
+  caches.forEach((entry) => {
+    const key = normalizeSourceKey(entry.source) || entry.source || 'unknown';
+    const safeKey = key || `folder_${entry.folderId || 'unknown'}`;
+    sourcesMap[safeKey] = entry.payload;
+    sourcesList.push({
+      source: safeKey,
+      folderId: entry.folderId,
+      fileId: entry.fileId
+    });
+  });
+
+  return {
+    ...base,
+    _combined: true,
+    _sources: sourcesMap,
+    _sourcesMeta: sourcesList
+  };
+}
 async function saveLyricsCacheToGDrive(cacheKey, payload, sourceHint) {
   if (!hasGDriveAuth()) {
     if (LYRICS_CACHE_DEBUG) {
@@ -914,6 +1011,10 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
 
       const args = [
         '-y',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-user_agent', AUDIO_CACHE_DASH_USER_AGENT,
+        '-allowed_extensions', 'ALL',
         '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
         '-i', tempPath
       ];
@@ -970,7 +1071,7 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
     let uploadPath = tempPath;
     let uploadExt = inputExt;
     if (AUDIO_CACHE_WITH_METADATA && ffmpegPath) {
-      const args = ['-y', '-i', tempPath];
+      const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', tempPath];
       if (coverPath) {
         args.push('-i', coverPath, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
         args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
@@ -2163,6 +2264,15 @@ app.get('/api/lyrics', async (req, res) => {
     }
     providerList = Array.from(new Set(providerList)).filter(p => DEFAULT_PROVIDERS.includes(p));
     if (providerList.length === 0) providerList = [...DEFAULT_PROVIDERS];
+
+    const multiSourceRequest = sourcesList.length > 1 && !explicitSingleSource;
+    if (multiSourceRequest && (!providerParam || providerParam === 'all')) {
+      const forced = (process.env.LYRICS_MULTI_PROVIDER || '').toString().trim().toLowerCase();
+      const preferred = forced && DEFAULT_PROVIDERS.includes(forced)
+        ? forced
+        : (providerList[0] || 'binimum');
+      providerList = [preferred];
+    }
     const providerKey = providerList.join('|');
 
     const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${baseSource}|${providerKey}`;
@@ -2172,10 +2282,13 @@ app.get('/api/lyrics', async (req, res) => {
       return res.json(cached);
     }
 
-    const gdriveCached = await loadLyricsCacheFromGDrive(gdriveCacheKey, sourcesList);
-    if (gdriveCached) {
-      setCache(cacheKey, gdriveCached, CACHE_TTL.lyrics);
-      return res.json(gdriveCached);
+    const gdriveCaches = await loadLyricsCachesFromGDrive(gdriveCacheKey, sourcesList);
+    if (gdriveCaches.length > 0) {
+      const combined = buildCombinedLyricsPayload(gdriveCaches, sourcesList);
+      if (combined) {
+        setCache(cacheKey, combined, CACHE_TTL.lyrics);
+        return res.json(combined);
+      }
     }
     if (ONLY_GOOGLE_DRIVE) {
       return res.status(404).json({
