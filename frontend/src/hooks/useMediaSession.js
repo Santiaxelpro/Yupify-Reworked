@@ -2,10 +2,11 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { getArtistName, getCoverUrl } from '../utils/helpers';
 
-const ART_SIZES = [96, 128, 192, 256, 384, 512, 1024];
+// Tidal only allows certain sizes (e.g. 320/640/1280). Smaller sizes return 403.
+const ART_SIZES = [320, 640, 1280];
 
 const buildArtwork = (track) => {
-  const baseUrl = getCoverUrl(track, 1024);
+  const baseUrl = getCoverUrl(track, 1280);
   if (!baseUrl) return [];
 
   return ART_SIZES.map((size) => {
