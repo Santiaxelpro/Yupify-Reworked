@@ -278,6 +278,27 @@ export const useAudio = () => {
   // ============================
   // 🔥 Cargar track + URL de audio real
   // ============================
+  const mergeTrackMeta = (base, extra) => {
+    if (!extra) return base || null;
+    if (!base) return extra;
+    const merged = { ...extra, ...base };
+    if (!merged.cover && extra.cover) merged.cover = extra.cover;
+    if (!merged.coverUrl && extra.coverUrl) merged.coverUrl = extra.coverUrl;
+    if (!merged.albumArtUrl && extra.albumArtUrl) merged.albumArtUrl = extra.albumArtUrl;
+    if (!merged.album && extra.album) merged.album = extra.album;
+    if (merged.album && extra.album) {
+      if (!merged.album.cover && extra.album.cover) {
+        merged.album = { ...merged.album, cover: extra.album.cover };
+      }
+      if (!merged.album.coverUrl && extra.album.coverUrl) {
+        merged.album = { ...merged.album, coverUrl: extra.album.coverUrl };
+      }
+    }
+    if (!merged.artists && extra.artists) merged.artists = extra.artists;
+    if (!merged.artist && extra.artist) merged.artist = extra.artist;
+    return merged;
+  };
+
   const playTrack = async (track) => {
     try {
       cancelFade();
@@ -311,7 +332,8 @@ export const useAudio = () => {
                   console.warn('Shaka detach warning:', e);
                 }
               }
-              const trackWithUrl = { ...track, streamUrl: fallbackData.url, isDash: false };
+              const mergedTrack = mergeTrackMeta(track, fallbackData);
+              const trackWithUrl = { ...mergedTrack, streamUrl: fallbackData.url, isDash: false };
               setCurrentTrack(trackWithUrl);
               setStreamUrl(fallbackData.url);
               if (audioElement) {
@@ -347,6 +369,8 @@ export const useAudio = () => {
         return;
       }
 
+      const mergedTrack = mergeTrackMeta(track, trackData);
+
       if (isDash) {
         // 🎬 DASH playback con Shaka Player
         console.log("🎬 Reproduciendo HI_RES DASH manifest");
@@ -376,7 +400,7 @@ export const useAudio = () => {
           }
 
           
-          setCurrentTrack({ ...track, isDash: true, manifest: trackData.manifest });
+          setCurrentTrack({ ...mergedTrack, isDash: true, manifest: trackData.manifest });
           // Intentar obtener la duración desde Shaka Player
           try {
             const shakaDur = typeof player.getDuration === 'function' ? player.getDuration() : null;
@@ -430,7 +454,7 @@ export const useAudio = () => {
         }
 
         // Actualizar currentTrack CON la URL extraída
-        const trackWithUrl = { ...track, streamUrl: realUrl, isDash: false };
+        const trackWithUrl = { ...mergedTrack, streamUrl: realUrl, isDash: false };
         setCurrentTrack(trackWithUrl);
         setStreamUrl(realUrl);
         

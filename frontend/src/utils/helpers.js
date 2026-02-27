@@ -50,9 +50,38 @@ export const formatPlays = (plays) => {
 export const getCoverUrl = (track, size = 1280) => {
   if (!track) return null;
 
-  // Si ya viene una URL completa desde tu API
-  if (track.cover && track.cover.startsWith("http")) {
-    return track.cover;
+  const pickHttpUrl = (value) => {
+    if (!value) return null;
+    if (typeof value === 'string') {
+      return value.startsWith('http') ? value : null;
+    }
+    if (typeof value === 'object') {
+      const maybe = value.url || value.src || value.href;
+      if (typeof maybe === 'string' && maybe.startsWith('http')) return maybe;
+    }
+    return null;
+  };
+
+  const directCandidates = [
+    track.cover,
+    track.coverUrl,
+    track.coverURL,
+    track.coverArtUrl,
+    track.artworkUrl,
+    track.image,
+    track.albumArtUrl,
+    track.album?.cover,
+    track.album?.coverUrl,
+    track.album?.coverURL,
+    track.album?.artworkUrl,
+    track.album?.image,
+    track.album?.images?.[0]?.url,
+    track.images?.[0]?.url
+  ];
+
+  for (const candidate of directCandidates) {
+    const direct = pickHttpUrl(candidate);
+    if (direct) return direct;
   }
 
   const normalizeCoverId = (value) => {
@@ -77,9 +106,6 @@ export const getCoverUrl = (track, size = 1280) => {
 
   // Si existe ID de portada de Tidal
   if (track.album?.cover) {
-    if (track.album.cover.startsWith('http')) {
-      return track.album.cover;
-    }
     const coverId = normalizeCoverId(track.album.cover);
     if (coverId) {
       return `https://resources.tidal.com/images/${coverId}/${size}x${size}.jpg`;
