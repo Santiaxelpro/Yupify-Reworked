@@ -163,16 +163,26 @@ async function getGDriveAccessToken() {
     return gdriveState.accessToken;
   }
 
-  const response = await axios.post(
-    'https://www.googleapis.com/oauth2/v4/token',
-    new URLSearchParams({
-      client_id: process.env.AUTH_KEY_CLIENT_ID,
-      client_secret: process.env.AUTH_KEY_CLIENT_SECRET,
-      refresh_token: process.env.AUTH_KEY_REFRESH_TOKEN,
-      grant_type: 'refresh_token'
-    }).toString(),
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
+  let response;
+  try {
+    response = await axios.post(
+      'https://www.googleapis.com/oauth2/v4/token',
+      new URLSearchParams({
+        client_id: process.env.AUTH_KEY_CLIENT_ID,
+        client_secret: process.env.AUTH_KEY_CLIENT_SECRET,
+        refresh_token: process.env.AUTH_KEY_REFRESH_TOKEN,
+        grant_type: 'refresh_token'
+      }).toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+  } catch (err) {
+    if (LYRICS_CACHE_DEBUG) {
+      const status = err?.response?.status;
+      const data = err?.response?.data;
+      console.log('[gdrive] token error:', status, data || err.message);
+    }
+    throw err;
+  }
 
   const data = response.data || {};
   if (!data.access_token) {
@@ -297,7 +307,9 @@ async function loadLyricsCacheFromGDrive(cacheKey, sources) {
       return content;
     } catch (e) {
       if (LYRICS_CACHE_DEBUG) {
-        console.log('[lyrics-cache] GDrive read error:', e.message);
+        const status = e?.response?.status;
+        const data = e?.response?.data;
+        console.log('[lyrics-cache] GDrive read error:', status || '', data || e.message);
       }
     }
   }
@@ -347,7 +359,9 @@ async function loadLyricsCachesFromGDrive(cacheKey, sources) {
       results.push({ source: sourceHint, payload, folderId, fileId: file.id });
     } catch (e) {
       if (LYRICS_CACHE_DEBUG) {
-        console.log('[lyrics-cache] GDrive read error:', e.message);
+        const status = e?.response?.status;
+        const data = e?.response?.data;
+        console.log('[lyrics-cache] GDrive read error:', status || '', data || e.message);
       }
     }
   }
@@ -2213,8 +2227,22 @@ app.get('/api/playlist/:id', async (req, res) => {
 app.get('/api/lyrics', async (req, res) => {
   try {
     // Aceptar 'track' como alias para 'title'
-    const { title, track, artist, album, duration, source, sourcePrefer, sourceOnly } = req.query;
+    const { title, track, artist, album, duration, source, sourcePrefer, sourceOnly, version } = req.query;
     const finalTitle = title || track;
+    const versionText = (version || '').toString().trim();
+    const titleVariants = [];
+    const baseTitle = (finalTitle || '').toString();
+    const lowerBaseTitle = baseTitle.toLowerCase();
+    const lowerVersion = versionText.toLowerCase();
+    const addTitleVariant = (value) => {
+      if (!value) return;
+      if (!titleVariants.includes(value)) titleVariants.push(value);
+    };
+    if (versionText && !lowerBaseTitle.includes(lowerVersion)) {
+      addTitleVariant(`${baseTitle} (${versionText})`);
+      addTitleVariant(`${baseTitle} - ${versionText}`);
+    }
+    addTitleVariant(baseTitle);
 
     if (!finalTitle || !artist) {
       return res.status(400).json({
@@ -2275,14 +2303,20 @@ app.get('/api/lyrics', async (req, res) => {
     }
     const providerKey = providerList.join('|');
 
-    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}|${baseSource}|${providerKey}`;
-    const gdriveCacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}`;
+    const versionKey = versionText ? `|${versionText}` : '';
+    const baseGdriveCacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}`;
+    const cacheKey = `lyrics:${finalTitle}|${artist}|${album || ""}|${duration || ""}${versionKey}|${baseSource}|${providerKey}`;
+    const gdriveCacheKey = `${baseGdriveCacheKey}${versionKey}`;
     const cached = getCache(cacheKey);
     if (cached) {
       return res.json(cached);
     }
 
-    const gdriveCaches = await loadLyricsCachesFromGDrive(gdriveCacheKey, sourcesList);
+    let gdriveCaches = await loadLyricsCachesFromGDrive(gdriveCacheKey, sourcesList);
+    if (gdriveCaches.length === 0 && versionText) {
+      // Fallback a cache sin versión para no romper caches existentes
+      gdriveCaches = await loadLyricsCachesFromGDrive(baseGdriveCacheKey, sourcesList);
+    }
     if (gdriveCaches.length > 0) {
       const combined = buildCombinedLyricsPayload(gdriveCaches, sourcesList);
       if (combined) {
@@ -2324,20 +2358,22 @@ app.get('/api/lyrics', async (req, res) => {
 
     const paramsVariants = [];
     const seenParams = new Set();
-    for (const art of artistVariants) {
-      for (const alb of albumVariants) {
-        for (const dur of durationVariants) {
-          const paramsObj = {
-            title: finalTitle,
-            artist: art,
-            album: alb || "",
-            duration: dur || "",
-            source: baseSource
-          };
-          const key = JSON.stringify(paramsObj);
-          if (seenParams.has(key)) continue;
-          seenParams.add(key);
-          paramsVariants.push(paramsObj);
+    for (const t of titleVariants) {
+      for (const art of artistVariants) {
+        for (const alb of albumVariants) {
+          for (const dur of durationVariants) {
+            const paramsObj = {
+              title: t,
+              artist: art,
+              album: alb || "",
+              duration: dur || "",
+              source: baseSource
+            };
+            const key = JSON.stringify(paramsObj);
+            if (seenParams.has(key)) continue;
+            seenParams.add(key);
+            paramsVariants.push(paramsObj);
+          }
         }
       }
     }

@@ -236,8 +236,9 @@ const Player = ({
     if (!currentTrack) return '';
     const baseId = currentTrack.id || currentTrack.trackId || '';
     const title = (currentTrack.title || '').toLowerCase();
+    const version = typeof currentTrack.version === 'string' ? currentTrack.version.trim().toLowerCase() : '';
     const artist = (getArtistName(currentTrack) || '').toLowerCase();
-    return `${baseId}|${title}|${artist}`;
+    return `${baseId}|${title}|${version}|${artist}`;
   }, [currentTrack]);
 
   const getAbsoluteSyllableTime = (line, syllable) => {
@@ -446,6 +447,7 @@ const Player = ({
 
   const trackTitle = currentTrack?.title || '';
   const trackArtist = currentTrack ? getArtistName(currentTrack) : '';
+  const trackVersion = typeof currentTrack?.version === 'string' ? currentTrack.version.trim() : '';
   const trackKey = React.useMemo(() => getLyricsKey(), [getLyricsKey]);
 
   React.useEffect(() => {
@@ -478,7 +480,7 @@ const Player = ({
         const preloadedRaw = preloaded?.raw ?? preloaded;
         let payload = preloadedRaw;
         if (!payload) {
-          payload = await api.track.getLyrics(trackTitle, trackArtist);
+          payload = await api.track.getLyrics(trackTitle, trackArtist, { version: trackVersion });
         }
 
         if (cancelled) return;
@@ -532,7 +534,7 @@ const Player = ({
           const sourceName = getLyricsSourceName(payload);
           const fromApple = sourceName.includes('apple');
           if (!payload || isLyricsEmpty(parsed) || !fromApple) {
-            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: 'apple' });
+            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: 'apple', version: trackVersion });
             parsed = normalizeLyricsPayload(payload);
           }
         } else if (combinedSources) {
@@ -542,11 +544,11 @@ const Player = ({
             payload = selected;
             parsed = normalizeLyricsPayload(payload);
           } else {
-            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource });
+            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource, version: trackVersion });
             parsed = normalizeLyricsPayload(payload);
           }
         } else {
-          payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource });
+          payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource, version: trackVersion });
           parsed = normalizeLyricsPayload(payload);
         }
 

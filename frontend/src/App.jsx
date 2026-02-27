@@ -395,8 +395,9 @@ const App = () => {
     if (lyricsInFlightRef.current.has(key)) return;
 
     lyricsInFlightRef.current.add(key);
+    const trackVersion = typeof currentTrack?.version === 'string' ? currentTrack.version.trim() : '';
     api.track
-      .getLyrics(currentTrack.title, getArtistName(currentTrack))
+      .getLyrics(currentTrack.title, getArtistName(currentTrack), { version: trackVersion })
       .then(response => {
         const raw = response?.raw ?? response;
         setLyricsCache(prev => ({ ...prev, [key]: raw }));
@@ -413,8 +414,9 @@ const App = () => {
     if (!track) return '';
     const artist = getArtistName(track);
     const title = track.title || '';
+    const version = typeof track.version === 'string' ? track.version.trim() : '';
     const id = track.id ?? '';
-    return `${id}|${title}|${artist}`.toLowerCase();
+    return `${id}|${title}|${version}|${artist}`.toLowerCase();
   };
 
   const fetchAutoplayTracks = async () => {

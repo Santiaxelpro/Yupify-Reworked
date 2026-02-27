@@ -179,6 +179,7 @@ export const trackService = {
     if (options.source) params.set('source', options.source);
     if (options.sourcePrefer) params.set('sourcePrefer', options.sourcePrefer);
     if (options.sourceOnly) params.set('sourceOnly', options.sourceOnly);
+    if (options.version) params.set('version', options.version);
     const response = await fetch(
       `${API_URL}/api/lyrics?${params.toString()}`,
       { headers: getHeaders() }
