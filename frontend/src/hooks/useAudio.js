@@ -125,6 +125,7 @@ export const useAudio = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTrack, setCurrentTrack] = useState(null);
   const [streamUrl, setStreamUrl] = useState(null);
+  const currentTrackRef = useRef(null);
 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -144,6 +145,10 @@ export const useAudio = () => {
   useEffect(() => {
     isMutedRef.current = isMuted;
   }, [isMuted]);
+
+  useEffect(() => {
+    currentTrackRef.current = currentTrack;
+  }, [currentTrack]);
 
   // ============================
   // 🔥 NUEVO: Calidad de audio global
@@ -236,7 +241,18 @@ export const useAudio = () => {
 
     const handleLoadedMeta = () => {
       const shakaDur = shakaPlayer && typeof shakaPlayer.getDuration === 'function' ? shakaPlayer.getDuration() : null;
-      setDuration(audio.duration || shakaDur || 0);
+      const audioDur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
+      const track = currentTrackRef.current;
+      const trackDurationMs = track?.durationMs ?? track?.duration_ms ?? null;
+      const trackDuration = track?.duration ?? track?.length ?? null;
+      const fallbackDur = trackDurationMs
+        ? Number(trackDurationMs) / 1000
+        : (Number.isFinite(Number(trackDuration)) ? Number(trackDuration) : null);
+      const nextDuration = audioDur || shakaDur || fallbackDur || 0;
+      setDuration(nextDuration);
+      if (Number.isFinite(nextDuration) && nextDuration > 0) {
+        console.log("✅ Audio metadata loaded, duration:", nextDuration);
+      }
     };
 
     const handleEnded = () => {
@@ -324,6 +340,10 @@ export const useAudio = () => {
             const presentation = String(fallbackData?.assetPresentation || '').toUpperCase();
             if (presentation === 'PREVIEW') continue;
             if (fallbackData?.manifestMimeType === 'application/dash+xml') continue;
+            if (audioElement?.canPlayType && fallbackData?.manifestMimeType) {
+              const canPlay = audioElement.canPlayType(fallbackData.manifestMimeType);
+              if (!canPlay) continue;
+            }
             if (fallbackData?.url) {
               if (shakaPlayer && typeof shakaPlayer.detach === 'function') {
                 try {
@@ -442,6 +462,15 @@ export const useAudio = () => {
           if (!ok) return;
         }
 
+        if (audioElement?.canPlayType && trackData?.manifestMimeType) {
+          const canPlay = audioElement.canPlayType(trackData.manifestMimeType);
+          if (!canPlay) {
+            console.warn("⚠️ MIME no soportado:", trackData.manifestMimeType, "→ intentando fallback");
+            const ok = await tryFallback();
+            if (!ok) return;
+          }
+        }
+
 
         
         // Detach Shaka before standard playback
@@ -465,7 +494,6 @@ export const useAudio = () => {
           audioElement.src = realUrl;
           console.log("✅ Audio src set, loading...");
           audioElement.load();
-          console.log("✅ Audio loaded, duration:", audioElement.duration);
         }
 
         const playPromise = audioElement?.play();

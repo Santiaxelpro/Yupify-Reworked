@@ -817,6 +817,92 @@ function buildAudioFileName(id, track, usedQuality, ext, nameHint = {}) {
   return `${safeBase}${qualityTag}${suffix}.${ext || 'm4a'}`;
 }
 
+function buildAudioMetaFileName(audioFileName) {
+  if (!audioFileName) return null;
+  const idx = audioFileName.lastIndexOf('.');
+  const base = idx > 0 ? audioFileName.slice(0, idx) : audioFileName;
+  return `${base}.json`;
+}
+
+function buildAudioMetaPayload({ id, track, usedQuality, nameHint }) {
+  if (!track && !id) return null;
+  const meta = extractTrackMetadata(track || {}, nameHint || {});
+  const albumObj = (track?.album && typeof track.album === 'object')
+    ? track.album
+    : (meta.albumTitle ? { title: meta.albumTitle } : undefined);
+  const duration = track?.duration ?? track?.trackDuration ?? track?.length ?? null;
+  const durationMs = track?.durationMs ?? track?.duration_ms ?? null;
+  return {
+    id: track?.id || track?.trackId || id || null,
+    title: meta.title || track?.title || track?.name || '',
+    artist: meta.artist || getArtistString(track),
+    album: albumObj,
+    albumTitle: meta.albumTitle || '',
+    cover: track?.cover || track?.album?.cover || null,
+    coverUrl: meta.coverUrl || null,
+    albumArtUrl: track?.albumArtUrl || null,
+    duration: duration,
+    durationMs: durationMs,
+    isrc: meta.isrc || null,
+    trackNumber: meta.trackNumber || null,
+    discNumber: meta.discNumber || null,
+    releaseYear: meta.releaseYear || null,
+    usedQuality: usedQuality || null,
+    cachedAt: new Date().toISOString()
+  };
+}
+
+async function loadAudioMetaFromGDrive(audioFileName) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_AUDIO_FOLDER) || !audioFileName) return null;
+  const metaName = buildAudioMetaFileName(audioFileName);
+  if (!metaName) return null;
+  try {
+    const file = await findGDriveFileByName(metaName, GDRIVE_AUDIO_FOLDER);
+    if (!file?.id) {
+      if (AUDIO_CACHE_DEBUG) {
+        console.log('[audio-cache] META MISS:', metaName);
+      }
+      return null;
+    }
+    const content = await downloadGDriveFile(file.id);
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] META HIT:', metaName, 'id:', file.id);
+    }
+    if (typeof content === 'string') {
+      try {
+        return JSON.parse(content);
+      } catch {
+        return null;
+      }
+    }
+    return content;
+  } catch (e) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] META read error:', e.message);
+    }
+    return null;
+  }
+}
+
+async function saveAudioMetaToGDrive(audioFileName, payload) {
+  if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_AUDIO_FOLDER) || !payload) return;
+  const metaName = buildAudioMetaFileName(audioFileName);
+  if (!metaName) return;
+  try {
+    const file = await findGDriveFileByName(metaName, GDRIVE_AUDIO_FOLDER);
+    const fileId = file?.id || await createGDriveFile(metaName, GDRIVE_AUDIO_FOLDER, 'application/json');
+    if (!fileId) throw new Error('Failed to create audio meta file in Google Drive');
+    await updateGDriveFile(fileId, JSON.stringify(payload), 'application/json');
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] META SAVE:', metaName, 'id:', fileId, file?.id ? '(update)' : '(create)');
+    }
+  } catch (e) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.log('[audio-cache] META save failed:', e.message);
+    }
+  }
+}
+
 function parseQualityFromFileName(name) {
   if (!name) return '';
   const match = name.match(/\[([A-Z_]+)\]/);
@@ -1006,6 +1092,7 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
     const tempPath = path.join(tmpDir, `yupify-audio-${id}-${Date.now()}-in.${inputExt || 'm4a'}`);
     const outputPath = path.join(tmpDir, `yupify-audio-${id}-${Date.now()}-out.${outputExt || 'm4a'}`);
     const meta = extractTrackMetadata(track, nameHint);
+    const metaPayload = buildAudioMetaPayload({ id, track, usedQuality, nameHint });
     const coverPath = meta.coverUrl ? path.join(tmpDir, `yupify-audio-${id}-${Date.now()}-cover.jpg`) : null;
 
     if (dashEnabled) {
@@ -1067,6 +1154,10 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
         console.log('[audio-cache] SAVE:', fileName, 'id:', fileId);
       }
 
+      if (metaPayload) {
+        await saveAudioMetaToGDrive(fileName, metaPayload);
+      }
+
       try { fs.unlinkSync(tempPath); } catch {}
       try { fs.unlinkSync(outputPath); } catch {}
       try { if (coverPath) fs.unlinkSync(coverPath); } catch {}
@@ -1119,6 +1210,10 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
 
     if (AUDIO_CACHE_DEBUG) {
       console.log('[audio-cache] SAVE:', fileName, 'id:', fileId);
+    }
+
+    if (metaPayload) {
+      await saveAudioMetaToGDrive(fileName, metaPayload);
     }
 
     try {
@@ -1703,14 +1798,32 @@ app.get('/api/track/:id', async (req, res) => {
       const audioCached = await findCachedAudioFile({ id, requestedQuality });
       if (audioCached?.file?.id) {
         const audioUrl = `/api/audio/file/${audioCached.file.id}`;
+        let meta = null;
+        if (audioCached.file.name) {
+          meta = await loadAudioMetaFromGDrive(audioCached.file.name);
+        }
+        if (!meta && (nameHint?.title || nameHint?.track || nameHint?.artist || nameHint?.album)) {
+          const hintedTitle = (nameHint?.title || nameHint?.track || '').toString().trim();
+          const hintedArtist = (nameHint?.artist || '').toString().trim();
+          const hintedAlbum = (nameHint?.album || '').toString().trim();
+          meta = {
+            id,
+            title: hintedTitle || undefined,
+            artist: hintedArtist || undefined,
+            album: hintedAlbum ? { title: hintedAlbum } : undefined,
+            albumTitle: hintedAlbum || undefined
+          };
+        }
         const payload = {
+          ...(meta && typeof meta === 'object' ? meta : {}),
           url: audioUrl,
           assetPresentation: 'FULL',
-          manifestMimeType: audioCached.file.mimeType || null,
+          manifestMimeType: audioCached.file.mimeType || meta?.manifestMimeType || null,
           requestedQuality,
           usedQuality: audioCached.quality || requestedQuality,
           cached: true
         };
+        if (!payload.id) payload.id = id;
         if (AUDIO_CACHE_DEBUG) {
           console.log('[audio-cache] USE:', audioCached.file.name, 'id:', audioCached.file.id);
         }
