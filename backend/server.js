@@ -35,6 +35,36 @@ const localEnvExists = fs.existsSync(localEnvPath);
 const secretsResult = secretsExists ? dotenv.config({ path: secretsEnvPath }) : null;
 const localResult = localEnvExists ? dotenv.config({ path: localEnvPath }) : null;
 
+if (process.env.FFMPEG_PATH) {
+  ffmpegPath = process.env.FFMPEG_PATH;
+}
+if (!ffmpegPath) {
+  ffmpegPath = 'ffmpeg';
+}
+
+try {
+  const ffmpegExists = ffmpegPath && fs.existsSync(ffmpegPath);
+  console.log(`🎬 FFMPEG: ${ffmpegPath} (${ffmpegExists ? 'exists' : 'missing'})`);
+} catch (e) {
+  console.log(`🎬 FFMPEG: ${ffmpegPath} (check failed)`);
+}
+
+if ((process.env.FFMPEG_PROBE || '').toString().toLowerCase() === 'true') {
+  try {
+    const probe = spawn(ffmpegPath, ['-version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    probe.stdout.on('data', (chunk) => { out += chunk.toString(); });
+    probe.stderr.on('data', (chunk) => { err += chunk.toString(); });
+    probe.on('close', (code) => {
+      const firstLine = (out || err).split('\n')[0]?.trim();
+      console.log(`🎬 FFMPEG probe exit ${code}: ${firstLine || 'no output'}`);
+    });
+  } catch (e) {
+    console.log(`🎬 FFMPEG probe failed: ${e.message}`);
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 // 🔥 Necesario para Render, Vercel, Cloudflare, Nginx, etc.
@@ -832,6 +862,18 @@ function buildAudioMetaPayload({ id, track, usedQuality, nameHint }) {
     : (meta.albumTitle ? { title: meta.albumTitle } : undefined);
   const duration = track?.duration ?? track?.trackDuration ?? track?.length ?? null;
   const durationMs = track?.durationMs ?? track?.duration_ms ?? null;
+  const normalizeQualityValue = (value) => {
+    if (!value) return null;
+    const raw = String(value).toUpperCase().trim();
+    if (!raw) return null;
+    const normalized = raw.replace(/[\s-]+/g, '_');
+    if (normalized === 'HIRES_LOSSLESS') return 'HI_RES_LOSSLESS';
+    if (normalized === 'HIRES') return 'HI_RES';
+    return normalized;
+  };
+
+  const audioQuality = normalizeQualityValue(track?.audioQuality || track?.quality || track?.streamQuality);
+
   return {
     id: track?.id || track?.trackId || id || null,
     title: meta.title || track?.title || track?.name || '',
@@ -848,6 +890,8 @@ function buildAudioMetaPayload({ id, track, usedQuality, nameHint }) {
     discNumber: meta.discNumber || null,
     releaseYear: meta.releaseYear || null,
     usedQuality: usedQuality || null,
+    requestedQuality: track?.requestedQuality || null,
+    audioQuality: audioQuality || null,
     cachedAt: new Date().toISOString()
   };
 }
@@ -923,6 +967,14 @@ function getQualityFallbackList(requestedQuality) {
 async function findCachedAudioFile({ id, requestedQuality }) {
   if (!hasGDriveAuth() || !isNonEmpty(GDRIVE_AUDIO_FOLDER) || !AUDIO_CACHE_READ) return null;
   const qualitiesToTry = getQualityFallbackList(requestedQuality);
+  const isAudioCandidate = (file) => {
+    if (!file) return false;
+    const name = (file.name || '').toLowerCase();
+    if (name.endsWith('.json')) return false;
+    const mime = (file.mimeType || '').toLowerCase();
+    if (mime && mime.includes('application/json')) return false;
+    return true;
+  };
   for (const quality of qualitiesToTry) {
     const query = [
       `name contains '(${id})'`,
@@ -933,7 +985,10 @@ async function findCachedAudioFile({ id, requestedQuality }) {
     try {
       const files = await findGDriveFileByQuery(query);
       if (files && files.length > 0) {
-        return { file: files[0], quality };
+        const audioFile = files.find(isAudioCandidate);
+        if (audioFile) {
+          return { file: audioFile, quality };
+        }
       }
     } catch (e) {
       if (AUDIO_CACHE_DEBUG) {
@@ -951,9 +1006,11 @@ async function findCachedAudioFile({ id, requestedQuality }) {
   try {
     const files = await findGDriveFileByQuery(fallbackQuery);
     if (files && files.length > 0) {
-      const file = files[0];
-      const inferredQuality = parseQualityFromFileName(file.name);
-      return { file, quality: inferredQuality || requestedQuality };
+      const audioFile = files.find(isAudioCandidate);
+      if (audioFile) {
+        const inferredQuality = parseQualityFromFileName(audioFile.name);
+        return { file: audioFile, quality: inferredQuality || requestedQuality };
+      }
     }
   } catch (e) {
     if (AUDIO_CACHE_DEBUG) {
@@ -968,6 +1025,8 @@ function extractTrackMetadata(track, nameHint = {}) {
   const hintedTitle = (nameHint?.title || nameHint?.track || '').toString().trim();
   const hintedArtist = (nameHint?.artist || '').toString().trim();
   const hintedAlbum = (nameHint?.album || '').toString().trim();
+  const hintedCover = (nameHint?.cover || '').toString().trim();
+  const hintedCoverUrl = (nameHint?.coverUrl || '').toString().trim();
 
   const title = hintedTitle || track?.title || track?.name || track?.trackTitle || '';
   const artist = hintedArtist || getArtistString(track);
@@ -977,7 +1036,13 @@ function extractTrackMetadata(track, nameHint = {}) {
   const isrc = track?.isrc || track?.externalIds?.isrc || '';
   const releaseDateRaw = track?.streamStartDate || track?.releaseDate || '';
   const releaseYear = releaseDateRaw ? new Date(releaseDateRaw).getFullYear() : '';
-  const coverUrl = buildCoverUrlFromTrack(track, 1280);
+  let coverUrl = buildCoverUrlFromTrack(track, 1280);
+  if (!coverUrl && hintedCoverUrl && hintedCoverUrl.startsWith('http')) {
+    coverUrl = hintedCoverUrl;
+  }
+  if (!coverUrl && hintedCover) {
+    coverUrl = buildCoverUrlFromTrack({ cover: hintedCover }, 1280);
+  }
 
   return { title, artist, albumTitle, trackNumber, discNumber, isrc, releaseYear, coverUrl };
 }
@@ -1142,7 +1207,22 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
       }
 
       args.push(outputPath);
-      await runFfmpeg(args);
+      try {
+        await runFfmpeg(args);
+      } catch (err) {
+        const message = String(err?.message || '');
+        if (message.toLowerCase().includes('option user_agent not found')) {
+          const fallbackArgs = args.filter((arg, idx) => {
+            const prev = args[idx - 1];
+            if (prev === '-user_agent') return false;
+            if (arg === '-user_agent') return false;
+            return true;
+          });
+          await runFfmpeg(fallbackArgs);
+        } else {
+          throw err;
+        }
+      }
 
       const mimeType = inferAudioMimeType(outputExt);
       const fileId = await createGDriveFile(fileName, GDRIVE_AUDIO_FOLDER, mimeType);
@@ -1776,7 +1856,9 @@ app.get('/api/track/:id', async (req, res) => {
       title: req.query.title,
       track: req.query.track,
       artist: req.query.artist,
-      album: req.query.album
+      album: req.query.album,
+      cover: req.query.cover,
+      coverUrl: req.query.coverUrl
     };
 
     // Calidad solicitada
@@ -1788,6 +1870,16 @@ app.get('/api/track/:id', async (req, res) => {
     // Si no existe, usar LOSSLESS
     const requestedQuality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
     const cacheKey = `track:${id}|q:${requestedQuality}`;
+
+    const normalizeQualityValue = (value) => {
+      if (!value) return null;
+      const raw = String(value).toUpperCase().trim();
+      if (!raw) return null;
+      const normalized = raw.replace(/[\s-]+/g, '_');
+      if (normalized === 'HIRES_LOSSLESS') return 'HI_RES_LOSSLESS';
+      if (normalized === 'HIRES') return 'HI_RES';
+      return normalized;
+    };
 
     const cached = getCache(cacheKey);
     if (cached) {
@@ -1814,13 +1906,18 @@ app.get('/api/track/:id', async (req, res) => {
             albumTitle: hintedAlbum || undefined
           };
         }
+        const cachedQuality = normalizeQualityValue(meta?.usedQuality)
+          || normalizeQualityValue(audioCached.quality)
+          || normalizeQualityValue(meta?.audioQuality)
+          || requestedQuality;
+
         const payload = {
           ...(meta && typeof meta === 'object' ? meta : {}),
           url: audioUrl,
           assetPresentation: 'FULL',
           manifestMimeType: audioCached.file.mimeType || meta?.manifestMimeType || null,
           requestedQuality,
-          usedQuality: audioCached.quality || requestedQuality,
+          usedQuality: cachedQuality,
           cached: true
         };
         if (!payload.id) payload.id = id;
@@ -1916,6 +2013,11 @@ app.get('/api/track/:id', async (req, res) => {
         // No modificar: el frontend necesita el manifest completo
       }
 
+      const reportedQuality = normalizeQualityValue(respData?.audioQuality || respData?.quality || respData?.streamQuality);
+      if (!isDashMime(respData?.manifestMimeType) && reportedQuality && VALID_QUALITIES.includes(reportedQuality)) {
+        usedQuality = reportedQuality;
+      }
+
       const payload = {
         ...respData,
         requestedQuality: requestedQuality,
@@ -1931,7 +2033,7 @@ app.get('/api/track/:id', async (req, res) => {
 
         let cached = await cacheTrackAudio({
           id,
-          track: respData,
+          track: payload,
           streamUrl: cacheUrl,
           usedQuality: cacheQuality,
           nameHint,
@@ -2412,7 +2514,7 @@ app.get('/api/lyrics', async (req, res) => {
       const preferred = forced && DEFAULT_PROVIDERS.includes(forced)
         ? forced
         : (providerList[0] || 'binimum');
-      providerList = [preferred];
+      providerList = [preferred, ...providerList.filter(p => p !== preferred)];
     }
     const providerKey = providerList.join('|');
 
