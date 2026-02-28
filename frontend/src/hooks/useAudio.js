@@ -336,7 +336,7 @@ export const useAudio = () => {
         const fallbackQualities = ['LOSSLESS', 'HIGH', 'LOW'];
         for (const q of fallbackQualities) {
           try {
-            const fallbackData = await api.track.getTrack(track.id, q);
+            const fallbackData = await api.track.getTrack(track.id, q, track);
             const presentation = String(fallbackData?.assetPresentation || '').toUpperCase();
             if (presentation === 'PREVIEW') continue;
             if (fallbackData?.manifestMimeType === 'application/dash+xml') continue;
@@ -372,7 +372,7 @@ export const useAudio = () => {
       };
 
       // Obtener track data con calidad seleccionada
-      const trackData = await api.track.getTrack(track.id, quality);
+      const trackData = await api.track.getTrack(track.id, quality, track);
       console.log("📡 Track data:", trackData);
       const presentation = String(trackData?.assetPresentation || '').toUpperCase();
 

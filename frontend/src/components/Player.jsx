@@ -13,7 +13,7 @@ import {
   FileText,
   Download
 } from "lucide-react";
-import { getArtistName, getTrackDisplayTitle, getCoverUrl } from '../utils/helpers';
+import { getArtistName, getTrackDisplayTitle, getCoverUrl, getTrackQualityValue, formatQualityLabel } from '../utils/helpers';
 import api from '../services/api';
 
 const Player = ({
@@ -104,24 +104,20 @@ const Player = ({
     return results;
   }, [getCombinedSources, lyricsSources]);
 
-  const toMs = (t) => {
-    if (t == null) return 0;
+  const toNumber = (t) => {
+    if (t == null) return null;
     const num = Number(t);
-    if (Number.isNaN(num)) return 0;
+    if (!Number.isFinite(num)) return null;
     return num;
-  };
-
-  const toSeconds = (t) => {
-    const ms = toMs(t);
-    return ms / 1000;
   };
 
   const normalizeLyricsPayload = (payload) => {
     const raw = payload?.raw ?? payload;
     if (!raw) return { structured: null, text: "No se encontraron letras." };
     const data = raw?.data ?? raw;
-    const pickTime = (obj) => toMs(obj?.time ?? obj?.startTime ?? obj?.begin);
-    const pickDuration = (obj) => toMs(obj?.duration ?? obj?.dur ?? obj?.length);
+
+    const pickTimeRaw = (obj) => toNumber(obj?.time ?? obj?.startTime ?? obj?.begin);
+    const pickDurationRaw = (obj) => toNumber(obj?.duration ?? obj?.dur ?? obj?.length);
 
     if (typeof data === 'string') {
       return { structured: null, text: data };
@@ -140,6 +136,44 @@ const Player = ({
       : (Array.isArray(data?.lines) ? data.lines : []);
 
     if (lyricsArray && Array.isArray(lyricsArray) && lyricsArray.length > 0) {
+      const inferUnit = (lines) => {
+        const values = [];
+        lines.forEach((line) => {
+          const t = pickTimeRaw(line);
+          if (Number.isFinite(t)) values.push(t);
+          const d = pickDurationRaw(line);
+          if (Number.isFinite(t) && Number.isFinite(d)) values.push(t + d);
+          const syllables = Array.isArray(line?.syllabus)
+            ? line.syllabus
+            : (Array.isArray(line?.syllables) ? line.syllables : []);
+          syllables.forEach((s) => {
+            const st = pickTimeRaw(s);
+            if (Number.isFinite(st)) values.push(st);
+            const sd = pickDurationRaw(s);
+            if (Number.isFinite(st) && Number.isFinite(sd)) values.push(st + sd);
+          });
+        });
+
+        const max = values.length > 0 ? Math.max(...values) : 0;
+        if (!Number.isFinite(max) || max <= 0) return 'ms';
+        if (max > 10000) return 'ms';
+        if (Number.isFinite(duration) && duration > 0) {
+          if (max <= duration * 3) return 's';
+          if (max >= duration * 100) return 'ms';
+        }
+        return max < 1000 ? 's' : 'ms';
+      };
+
+      const timeUnit = inferUnit(lyricsArray);
+      const toMs = (value) => {
+        const num = toNumber(value);
+        if (!Number.isFinite(num)) return 0;
+        return timeUnit === 's' ? num * 1000 : num;
+      };
+      const toSeconds = (value) => toMs(value) / 1000;
+      const pickTime = (obj) => toMs(pickTimeRaw(obj));
+      const pickDuration = (obj) => toMs(pickDurationRaw(obj));
+
       const timesMs = lyricsArray.map(l => pickTime(l));
       const validTimes = timesMs.filter(t => Number.isFinite(t) && t >= 0);
       const hasTiming = validTimes.length >= 2;
@@ -449,6 +483,7 @@ const Player = ({
   const trackArtist = currentTrack ? getArtistName(currentTrack) : '';
   const trackVersion = typeof currentTrack?.version === 'string' ? currentTrack.version.trim() : '';
   const trackKey = React.useMemo(() => getLyricsKey(), [getLyricsKey]);
+  const playbackQuality = formatQualityLabel(getTrackQualityValue(currentTrack, quality), quality);
 
   React.useEffect(() => {
     if (!trackKey) return;
@@ -480,7 +515,11 @@ const Player = ({
         const preloadedRaw = preloaded?.raw ?? preloaded;
         let payload = preloadedRaw;
         if (!payload) {
-          payload = await api.track.getLyrics(trackTitle, trackArtist, { version: trackVersion });
+          payload = await api.track.getLyrics(trackTitle, trackArtist, {
+            version: trackVersion,
+            album: currentTrack?.album?.title || currentTrack?.albumTitle,
+            duration: currentTrack?.duration
+          });
         }
 
         if (cancelled) return;
@@ -534,7 +573,12 @@ const Player = ({
           const sourceName = getLyricsSourceName(payload);
           const fromApple = sourceName.includes('apple');
           if (!payload || isLyricsEmpty(parsed) || !fromApple) {
-            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: 'apple', version: trackVersion });
+            payload = await api.track.getLyrics(trackTitle, trackArtist, {
+              sourceOnly: 'apple',
+              version: trackVersion,
+              album: currentTrack?.album?.title || currentTrack?.albumTitle,
+              duration: currentTrack?.duration
+            });
             parsed = normalizeLyricsPayload(payload);
           }
         } else if (combinedSources) {
@@ -544,11 +588,21 @@ const Player = ({
             payload = selected;
             parsed = normalizeLyricsPayload(payload);
           } else {
-            payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource, version: trackVersion });
+            payload = await api.track.getLyrics(trackTitle, trackArtist, {
+              sourceOnly: lyricsSource,
+              version: trackVersion,
+              album: currentTrack?.album?.title || currentTrack?.albumTitle,
+              duration: currentTrack?.duration
+            });
             parsed = normalizeLyricsPayload(payload);
           }
         } else {
-          payload = await api.track.getLyrics(trackTitle, trackArtist, { sourceOnly: lyricsSource, version: trackVersion });
+          payload = await api.track.getLyrics(trackTitle, trackArtist, {
+            sourceOnly: lyricsSource,
+            version: trackVersion,
+            album: currentTrack?.album?.title || currentTrack?.albumTitle,
+            duration: currentTrack?.duration
+          });
           parsed = normalizeLyricsPayload(payload);
         }
 
@@ -1098,7 +1152,7 @@ const Player = ({
             <p className="text-sm text-gray-400 truncate">
               {getArtistName(currentTrack)}
             </p>
-            <span className="text-xs" style={{ color: accent }}>LOSSLESS</span>
+            <span className="text-xs" style={{ color: accent }}>{playbackQuality}</span>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 ml-auto w-full sm:w-auto justify-end">

@@ -1,7 +1,7 @@
 // src/components/TrackCard.jsx
 import React from 'react';
 import { Play, Heart, Download } from 'lucide-react';
-import { getArtistName, getCoverUrl, getTrackDisplayTitle } from '../utils/helpers';
+import { getArtistName, getCoverUrl, getTrackDisplayTitle, getTrackQualityValue, formatQualityLabel } from '../utils/helpers';
 
 const TrackCard = ({ track, onPlay, onToggleFavorite, onDownload, isFavorite }) => {
   
@@ -48,7 +48,7 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, onDownload, isFavorite }) 
       <p className="text-sm text-gray-400 truncate">{getArtistName(track)}</p>
       <div className="flex items-center justify-between mt-2">
         <span className="text-xs text-green-400 font-semibold">
-          {track.audioQuality || track.quality || 'HI_RES'}
+          {formatQualityLabel(getTrackQualityValue(track, '-'), '-')}
         </span>
         {track.plays && (
           <span className="text-xs text-gray-500">{track.plays} plays</span>
@@ -59,3 +59,4 @@ const TrackCard = ({ track, onPlay, onToggleFavorite, onDownload, isFavorite }) 
 };
 
 export default TrackCard;
+

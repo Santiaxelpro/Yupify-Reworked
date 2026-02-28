@@ -162,6 +162,68 @@ export const getAudioQuality = (quality) => {
 };
 
 /**
+ * Obtener la calidad de audio real (preferir la usada en playback).
+ */
+export const getTrackQualityValue = (track, fallback = '') => {
+  if (!track) return fallback;
+  const getQualityFromTags = (tags) => {
+    if (!Array.isArray(tags) || tags.length === 0) return null;
+    const normalized = tags
+      .map(tag => String(tag || '').toUpperCase().replace(/[\s-]+/g, '_'))
+      .filter(Boolean);
+    if (normalized.includes('HIRES_LOSSLESS') || normalized.includes('HI_RES_LOSSLESS')) {
+      return 'HI_RES_LOSSLESS';
+    }
+    if (normalized.includes('HIRES') || normalized.includes('HI_RES')) {
+      return 'HI_RES';
+    }
+    if (normalized.includes('LOSSLESS')) return 'LOSSLESS';
+    if (normalized.includes('HIGH')) return 'HIGH';
+    if (normalized.includes('LOW')) return 'LOW';
+    return null;
+  };
+
+  const tagQuality = getQualityFromTags(track.mediaMetadata?.tags);
+  const usedQuality = typeof track.usedQuality === 'string' ? track.usedQuality.trim() : '';
+  const requestedQuality = typeof track.requestedQuality === 'string' ? track.requestedQuality.trim() : '';
+  const audioQuality = typeof track.audioQuality === 'string' ? track.audioQuality.trim() : '';
+  const manifestMime = typeof track.manifestMimeType === 'string' ? track.manifestMimeType.toLowerCase() : '';
+  const isDash = manifestMime.includes('dash');
+
+  if (isDash) {
+    if (usedQuality) return usedQuality;
+    if (requestedQuality) return requestedQuality;
+    return 'HI_RES_LOSSLESS';
+  }
+
+  const candidates = [
+    usedQuality,
+    requestedQuality,
+    tagQuality,
+    audioQuality,
+    track.quality,
+    track.streamQuality,
+    track.stream?.quality
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return fallback;
+};
+
+/**
+ * Formatear etiqueta de calidad para UI (quita guiones bajos)
+ */
+export const formatQualityLabel = (quality, fallback = '') => {
+  if (quality == null) return fallback;
+  const text = String(quality).trim();
+  if (!text) return fallback;
+  return text.replace(/_/g, ' ');
+};
+
+/**
  * Barajar array (shuffle)
  */
 export const shuffleArray = (array) => {
@@ -324,6 +386,8 @@ export default {
   getTrackDisplayTitle,
   getArtistName,
   getAudioQuality,
+  getTrackQualityValue,
+  formatQualityLabel,
   shuffleArray,
   debounce,
   validateEmail,

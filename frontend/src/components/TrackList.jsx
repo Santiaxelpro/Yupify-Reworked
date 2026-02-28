@@ -1,7 +1,7 @@
 // src/components/TrackList.jsx
 import React from 'react';
 import { Play, Heart, Download } from 'lucide-react';
-import { getCoverUrl, getArtistName, getTrackDisplayTitle } from '../utils/helpers';
+import { getCoverUrl, getArtistName, getTrackDisplayTitle, getTrackQualityValue, formatQualityLabel } from '../utils/helpers';
 
 const TrackList = ({ tracks, onPlay, onToggleFavorite, onDownload, favorites = [], currentTrackId }) => {
   
@@ -45,7 +45,7 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, onDownload, favorites = [
               <h3 className="font-semibold truncate">{getTrackDisplayTitle(track)}</h3>
               <p className="text-sm text-gray-400 truncate">{getArtistName(track)}</p>
               <span className="text-xs text-[#1db954]">
-                {track.audioQuality || track.quality || 'HI_RES'}
+                {formatQualityLabel(getTrackQualityValue(track, '-'), '-')}
               </span>
             </div>
             
@@ -81,3 +81,4 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, onDownload, favorites = [
 };
 
 export default TrackList;
+

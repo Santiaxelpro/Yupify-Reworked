@@ -17,7 +17,7 @@ import Navigation from './components/Navigation';
 
 // Services
 import api from './services/api';
-import { getArtistName, getLocalStorage, setLocalStorage } from './utils/helpers';
+import { getArtistName, getLocalStorage, setLocalStorage, getTrackQualityValue } from './utils/helpers';
 import { normalizeText, getTrackKey } from './utils/autoplay';
 
 const GUEST_HISTORY_KEY = 'yupify_guest_history';
@@ -98,6 +98,17 @@ const App = () => {
   useEffect(() => {
     durationRef.current = duration;
   }, [duration]);
+
+  useEffect(() => {
+    if (!currentTrack) return;
+    const state = playbackRef.current;
+    if (!state?.track) return;
+    const stateId = state.track?.id ?? state.track?.trackId;
+    const currentId = currentTrack?.id ?? currentTrack?.trackId;
+    if (stateId == null || currentId == null) return;
+    if (String(stateId) !== String(currentId)) return;
+    playbackRef.current = { ...state, track: currentTrack };
+  }, [currentTrack]);
 
   // Cargar datos al iniciar
   useEffect(() => {
@@ -259,12 +270,19 @@ const App = () => {
     const skipped = endedNaturally ? false : (manualSkip || autoSkip);
     const finalSkipReason = manualSkip ? skipReason : (skipped ? 'short_listen' : null);
 
+    const resolvedQuality = getTrackQualityValue(track, quality);
+    const requestedQuality = track?.requestedQuality || quality || null;
+    const usedQuality = track?.usedQuality || null;
+
     const entry = {
       id: track.id,
       title: track.title,
       artist: getArtistName(track),
       cover: track.album?.cover || track.cover,
       duration: track.duration,
+      quality: resolvedQuality || null,
+      requestedQuality,
+      usedQuality,
       listenSeconds,
       listenRatio,
       skipped,
@@ -397,7 +415,11 @@ const App = () => {
     lyricsInFlightRef.current.add(key);
     const trackVersion = typeof currentTrack?.version === 'string' ? currentTrack.version.trim() : '';
     api.track
-      .getLyrics(currentTrack.title, getArtistName(currentTrack), { version: trackVersion })
+      .getLyrics(currentTrack.title, getArtistName(currentTrack), {
+        version: trackVersion,
+        album: currentTrack?.album?.title || currentTrack?.albumTitle,
+        duration: currentTrack?.duration
+      })
       .then(response => {
         const raw = response?.raw ?? response;
         setLyricsCache(prev => ({ ...prev, [key]: raw }));
@@ -639,6 +661,11 @@ const App = () => {
       ? base.artists
       : (artistName ? artistName.split(',').map(name => ({ name: name.trim() })) : []);
     const album = base.album || (entry.cover ? { cover: entry.cover } : undefined);
+    const usedQuality = base.usedQuality ?? entry.usedQuality ?? null;
+    const requestedQuality = base.requestedQuality ?? entry.requestedQuality ?? null;
+    const audioQuality = base.audioQuality ?? entry.audioQuality ?? null;
+    const qualityValue = base.quality ?? entry.quality ?? null;
+
     return {
       ...base,
       id,
@@ -647,7 +674,11 @@ const App = () => {
       artist: base.artist || (artistName ? { name: artistName } : base.artist),
       album,
       cover: base.cover || entry.cover,
-      duration: base.duration ?? entry.duration
+      duration: base.duration ?? entry.duration,
+      usedQuality,
+      requestedQuality,
+      audioQuality,
+      quality: qualityValue
     };
   };
 

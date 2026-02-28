@@ -133,9 +133,25 @@ export const searchService = {
 
 export const trackService = {
   // Obtener información de track
-  getTrack: async (trackId, quality = 'LOSSLESS') => {
+  getTrack: async (trackId, quality = 'LOSSLESS', meta = null) => {
+    const params = new URLSearchParams({ quality });
+    if (meta) {
+      const title = meta.title || meta.track || meta.name;
+      const artist = Array.isArray(meta.artists) && meta.artists.length > 0
+        ? meta.artists.map(a => a?.name || a).filter(Boolean).join(', ')
+        : (meta.artist?.name || meta.artist);
+      const album = meta.album?.title || meta.album?.name || meta.albumTitle;
+      const cover = meta.album?.cover || meta.cover || meta.coverId;
+      const coverUrl = meta.coverUrl || meta.albumArtUrl;
+      if (title) params.set('title', title);
+      if (artist) params.set('artist', artist);
+      if (album) params.set('album', album);
+      if (cover) params.set('cover', cover);
+      if (coverUrl) params.set('coverUrl', coverUrl);
+    }
+
     const response = await fetch(
-      `${API_URL}/api/track/${trackId}?quality=${quality}`,
+      `${API_URL}/api/track/${trackId}?${params.toString()}`,
       { headers: getHeaders() }
     );
 
@@ -176,6 +192,13 @@ export const trackService = {
 
   getLyrics: async (title, artist, options = {}) => {
     const params = new URLSearchParams({ track: title, artist: artist });
+    if (options.album) params.set('album', options.album);
+    if (options.duration != null && options.duration !== '') {
+      const durationValue = Number(options.duration);
+      if (Number.isFinite(durationValue)) {
+        params.set('duration', String(Math.round(durationValue)));
+      }
+    }
     if (options.source) params.set('source', options.source);
     if (options.sourcePrefer) params.set('sourcePrefer', options.sourcePrefer);
     if (options.sourceOnly) params.set('sourceOnly', options.sourceOnly);
