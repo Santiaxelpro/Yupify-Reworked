@@ -80,6 +80,13 @@ jobs:
         run: npm install -g @capacitor/cli
         working-directory: frontend
 
+      - name: Add Android platform (if missing)
+        working-directory: frontend
+        run: |
+          if [ ! -d android ]; then
+            npx cap add android || true
+          fi
+
       - name: Sync Android project (Capacitor)
         working-directory: frontend
         env:
