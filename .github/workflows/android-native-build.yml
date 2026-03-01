@@ -80,11 +80,27 @@ jobs:
         run: npm install -g @capacitor/cli
         working-directory: frontend
 
-      - name: Add Android platform (if missing)
+      - name: Add Android platform (ensure gradlew exists)
         working-directory: frontend
         run: |
+          # attempt to add Android platform (creates android/ and gradlew)
+          npx cap add android --web-dir=dist || true
+          # fallback: ensure platform exists
           if [ ! -d android ]; then
-            npx cap add android || true
+            echo "Android platform directory missing after cap add"
+            ls -la . || true
+            exit 1
+          fi
+
+      - name: Verify Android project and gradlew
+        working-directory: frontend
+        run: |
+          echo "Listing frontend/android"
+          ls -la android || true
+          if [ ! -f android/gradlew ]; then
+            echo "Error: gradlew not found in android/"
+            ls -la android || true
+            exit 1
           fi
 
       - name: Sync Android project (Capacitor)
