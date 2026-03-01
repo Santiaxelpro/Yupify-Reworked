@@ -83,12 +83,11 @@ jobs:
       - name: Build release APK
         env:
           ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
         run: |
           cd frontend/android
           chmod +x ./gradlew
           ./gradlew assembleRelease -Pandroid.injected.testOnly=false
-        env:
-          JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
 
       - name: Prepare keystore and signing env (optional)
         if: secrets.ANDROID_KEYSTORE_B64 != ''
@@ -119,7 +118,7 @@ jobs:
           $SDKROOT/build-tools/$BT/apksigner verify "$signed_apk"
           mv "$signed_apk" frontend/android/app/build/outputs/apk/release/app-release-signed.apk
         env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
           ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Upload APK
