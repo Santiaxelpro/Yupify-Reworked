@@ -41,8 +41,12 @@ jobs:
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
           unzip -q /tmp/cmdline.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS"
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+          # ensure sdkmanager lives under cmdline-tools/latest
+          if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" ]; then
+            mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          fi
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
