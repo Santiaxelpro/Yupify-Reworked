@@ -3,7 +3,11 @@
 // Base URL de la API
 // En desarrollo por defecto apunta al backend local en http://localhost:3000
 // Puedes sobrescribir con VITE_API_URL en .env
-const DEFAULT_PROD_API = 'https://yupify-reworked.vercel.app';
+const DEFAULT_PROD_APIS = [
+  'https://yupify-reworked.vercel.app/',
+  'https://yupify-reworked.onrender.com/',
+  'https://api.itzsantiax.qzz.io/',
+]
 
 const normalizeApiUrl = (value) => {
   if (!value) return '';
