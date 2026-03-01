@@ -1,0 +1,109 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API_LEVEL: 33
+      ANDROID_BUILD_TOOLS: "33.0.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build web (Vite)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK commandline tools
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+        run: |
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip -q /tmp/cmdline.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+
+      - name: Install Capacitor CLI
+        run: npm install -g @capacitor/cli
+        working-directory: frontend
+
+      - name: Add Android platform (if missing) and sync
+        working-directory: frontend
+        run: |
+          # add platform if not exists
+          if [ ! -d android ]; then
+            npx cap add android || true
+          fi
+          npx cap sync android
+          npx cap copy android
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+
+      - name: Prepare keystore (optional)
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            echo "Decoding keystore"
+            mkdir -p frontend/android/app
+            echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > frontend/android/app/my-release-key.jks
+            echo "RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "No keystore secret provided; building unsigned APK"
+          fi
+
+      - name: Build release APK
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
+        run: |
+          cd frontend/android
+          chmod +x ./gradlew
+          ./gradlew assembleRelease -Pandroid.injected.testOnly=false
+
+      - name: Zipalign + Apksigner (optional)
+        env:
+          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            SDKROOT=$RUNNER_TEMP/android-sdk
+            BT=${ANDROID_BUILD_TOOLS}
+            unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
+            if [ ! -f "$unsigned_apk" ]; then
+              unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
+            fi
+            echo "Unsigned APK: $unsigned_apk"
+            $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" app-release-aligned.apk
+            $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out app-release-signed.apk app-release-aligned.apk
+            $SDKROOT/build-tools/$BT/apksigner verify app-release-signed.apk
+            mv app-release-signed.apk frontend/android/app/build/outputs/apk/release/app-release-signed.apk
+          else
+            echo "No keystore provided, skipping signing"
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: yupify-apk
+          path: frontend/android/app/build/outputs/apk/release/*.apk

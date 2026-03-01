@@ -1,0 +1,6 @@
+{
+  "appId": "com.yupify.app",
+  "appName": "Yupify",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
