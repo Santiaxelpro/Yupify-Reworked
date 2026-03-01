@@ -24,6 +24,11 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Ensure Capacitor packages installed
+        working-directory: frontend
+        run: |
+          npm install @capacitor/core@latest @capacitor/android@latest --no-save
+
       - name: Build web (Vite)
         working-directory: frontend
         run: npm run build
