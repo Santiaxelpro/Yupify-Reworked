@@ -1,0 +1,127 @@
+name: Build Android APK (native Rust libs)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+      ANDROID_API_LEVEL: 33
+      ANDROID_BUILD_TOOLS: "33.0.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build web (Vite)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK commandline tools
+        run: |
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip -q /tmp/cmdline.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;25.2.9519653"
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses || true
+
+      - name: Setup Rust toolchain and targets
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Add Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build native Rust libraries for Android
+        run: |
+          chmod +x scripts/build-android-ffi.sh
+          ./scripts/build-android-ffi.sh
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+
+      - name: Install Capacitor CLI
+        run: npm install -g @capacitor/cli
+        working-directory: frontend
+
+      - name: Sync Android project (Capacitor)
+        working-directory: frontend
+        run: |
+          npx cap sync android
+          npx cap copy android
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+
+      - name: Ensure ABI libs placed
+        run: ls -la frontend/android/app/src/main/jniLibs || true
+
+      - name: Build release APK
+        run: |
+          cd frontend/android
+          chmod +x ./gradlew
+          ./gradlew assembleRelease -Pandroid.injected.testOnly=false
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+
+      - name: Prepare keystore and signing env (optional)
+        if: secrets.ANDROID_KEYSTORE_B64 != ''
+        run: |
+          echo "Decoding keystore"
+          mkdir -p frontend/android/app
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > frontend/android/app/my-release-key.jks
+          echo "Keystore written: frontend/android/app/my-release-key.jks"
+          echo "RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+          echo "RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_ENV
+          echo "RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_ENV
+
+      - name: Zipalign + Apksigner (if keystore provided)
+        if: secrets.ANDROID_KEYSTORE_B64 != ''
+        run: |
+          SDKROOT=${{ env.ANDROID_SDK_ROOT }}
+          BT=${{ env.ANDROID_BUILD_TOOLS }}
+          unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          aligned_apk=app-release-aligned.apk
+          signed_apk=app-release-signed.apk
+          if [ ! -f "$unsigned_apk" ]; then
+            # try other possible names
+            unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
+          fi
+          echo "Unsigned APK: $unsigned_apk"
+          $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" "$aligned_apk"
+          $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out "$signed_apk" "$aligned_apk"
+          $SDKROOT/build-tools/$BT/apksigner verify "$signed_apk"
+          mv "$signed_apk" frontend/android/app/build/outputs/apk/release/app-release-signed.apk
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: yupify-native-apk
+          path: frontend/android/app/build/outputs/apk/release/*.apk
