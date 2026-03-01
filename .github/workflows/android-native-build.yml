@@ -9,7 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
       ANDROID_API_LEVEL: 33
       ANDROID_BUILD_TOOLS: "33.0.0"
 
@@ -36,12 +35,14 @@ jobs:
           java-version: 17
 
       - name: Install Android SDK commandline tools
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
         run: |
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
-          unzip -q /tmp/cmdline.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;25.2.9519653"
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses || true
+          unzip -q /tmp/cmdline.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;25.2.9519653"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
 
       - name: Setup Rust toolchain and targets
         uses: actions-rs/toolchain@v1
@@ -58,11 +59,11 @@ jobs:
         run: cargo install cargo-ndk --locked
 
       - name: Build native Rust libraries for Android
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
         run: |
           chmod +x scripts/build-android-ffi.sh
           ./scripts/build-android-ffi.sh
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
@@ -70,23 +71,24 @@ jobs:
 
       - name: Sync Android project (Capacitor)
         working-directory: frontend
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
         run: |
           npx cap sync android
           npx cap copy android
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: Ensure ABI libs placed
         run: ls -la frontend/android/app/src/main/jniLibs || true
 
       - name: Build release APK
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
         run: |
           cd frontend/android
           chmod +x ./gradlew
           ./gradlew assembleRelease -Pandroid.injected.testOnly=false
         env:
           JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
 
       - name: Prepare keystore and signing env (optional)
         if: secrets.ANDROID_KEYSTORE_B64 != ''
