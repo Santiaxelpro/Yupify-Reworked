@@ -565,7 +565,11 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:5173',
       'https://yupify-reworked.vercel.app',
-      'https://yupify-reworked.onrender.com'
+      'https://yupify-reworked.onrender.com',
+      'tauri://localhost',
+      'https://tauri.localhost',
+      'http://tauri.localhost',
+      'app://localhost'
     ];
     
     // Permitir si está en la lista, si no tiene origin (server-to-server), o si es wildcard

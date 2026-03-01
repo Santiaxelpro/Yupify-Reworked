@@ -3,11 +3,31 @@
 // Base URL de la API
 // En desarrollo por defecto apunta al backend local en http://localhost:3000
 // Puedes sobrescribir con VITE_API_URL en .env
-const API_URL = import.meta.env.VITE_API_URL || (
-  import.meta.env.DEV 
+const DEFAULT_PROD_API = 'https://yupify-reworked.vercel.app';
+
+const normalizeApiUrl = (value) => {
+  if (!value) return '';
+  let url = String(value).trim();
+  if (!url) return '';
+  if (url.startsWith('VITE_API_URL=')) {
+    url = url.slice('VITE_API_URL='.length).trim();
+  }
+  return url;
+};
+
+const isLocalhostUrl = (value) =>
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(String(value || '').trim());
+
+const envApiUrl = normalizeApiUrl(import.meta.env.VITE_API_URL);
+let API_URL = envApiUrl || (
+  import.meta.env.DEV
     ? 'http://localhost:3000' // En local (npm run dev)
-    : 'https://yupify-reworked.vercel.app'   // En producción (Vercel) usa la máscara
+    : DEFAULT_PROD_API // En producci?n (Vercel) usa la m?scara
 );
+
+if (import.meta.env.PROD && isLocalhostUrl(API_URL)) {
+  API_URL = DEFAULT_PROD_API;
+}
 
 // ==================== UTILIDADES ====================
 

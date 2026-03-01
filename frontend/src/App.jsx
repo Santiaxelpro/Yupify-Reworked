@@ -18,6 +18,7 @@ import Navigation from './components/Navigation';
 // Services
 import api from './services/api';
 import { getArtistName, getLocalStorage, setLocalStorage, getTrackQualityValue } from './utils/helpers';
+import { setDiscordActivity, clearDiscordActivity, disconnectDiscordRpc, isTauriApp } from './utils/discordRpc';
 import { normalizeText, getTrackKey } from './utils/autoplay';
 
 const GUEST_HISTORY_KEY = 'yupify_guest_history';
@@ -90,6 +91,8 @@ const App = () => {
   const playbackRef = useRef(null);
   const currentTimeRef = useRef(0);
   const durationRef = useRef(0);
+  const rpcTrackIdRef = useRef(null);
+  const rpcPlayingRef = useRef(false);
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -109,6 +112,70 @@ const App = () => {
     if (String(stateId) !== String(currentId)) return;
     playbackRef.current = { ...state, track: currentTrack };
   }, [currentTrack]);
+
+  useEffect(() => {
+    if (!isTauriApp()) return;
+
+    const trackId = currentTrack?.id ?? currentTrack?.trackId ?? null;
+    if (!trackId) {
+      rpcTrackIdRef.current = null;
+      rpcPlayingRef.current = false;
+      clearDiscordActivity();
+      return;
+    }
+
+    const trackChanged = rpcTrackIdRef.current !== trackId;
+    const playingChanged = rpcPlayingRef.current !== isPlaying;
+    if (!trackChanged && !playingChanged) return;
+
+    rpcTrackIdRef.current = trackId;
+    rpcPlayingRef.current = isPlaying;
+
+    const title = currentTrack?.title || 'Yupify';
+    const artist = getArtistName(currentTrack) || '';
+    const album = currentTrack?.album?.title || currentTrack?.albumTitle || '';
+    const details = title;
+    let state = artist;
+    if (album) {
+      state = artist ? `${artist} · ${album}` : album;
+    }
+    if (!state) {
+      state = isPlaying ? 'Reproduciendo' : 'Pausado';
+    }
+
+    const durationSeconds = Number.isFinite(currentTrack?.duration)
+      ? Math.floor(currentTrack.duration)
+      : null;
+    let startTimestamp = null;
+    let endTimestamp = null;
+    if (isPlaying) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const offset = Math.max(
+        0,
+        Math.floor(Number.isFinite(currentTimeRef.current) ? currentTimeRef.current : 0)
+      );
+      startTimestamp = nowSec - offset;
+      if (durationSeconds) {
+        endTimestamp = startTimestamp + durationSeconds;
+      }
+    }
+
+    setDiscordActivity({
+      details,
+      state,
+      startTimestamp,
+      endTimestamp,
+      largeText: 'Yupify'
+    });
+  }, [currentTrack, isPlaying]);
+
+  useEffect(() => {
+    if (!isTauriApp()) return undefined;
+    return () => {
+      clearDiscordActivity();
+      disconnectDiscordRpc();
+    };
+  }, []);
 
   // Cargar datos al iniciar
   useEffect(() => {
