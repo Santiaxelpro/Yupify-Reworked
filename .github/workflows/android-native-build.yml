@@ -90,36 +90,41 @@ jobs:
           ./gradlew assembleRelease -Pandroid.injected.testOnly=false
 
       - name: Prepare keystore and signing env (optional)
-        if: secrets.ANDROID_KEYSTORE_B64 != ''
-        run: |
-          echo "Decoding keystore"
-          mkdir -p frontend/android/app
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > frontend/android/app/my-release-key.jks
-          echo "Keystore written: frontend/android/app/my-release-key.jks"
-          echo "RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
-          echo "RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_ENV
-          echo "RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_ENV
+          run: |
+            if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+              echo "Decoding keystore"
+              mkdir -p frontend/android/app
+              echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > frontend/android/app/my-release-key.jks
+              echo "Keystore written: frontend/android/app/my-release-key.jks"
+              echo "RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+              echo "RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_ENV
+              echo "RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_ENV
+            else
+              echo "No keystore secret provided; skipping keystore preparation"
+            fi
 
       - name: Zipalign + Apksigner (if keystore provided)
-        if: secrets.ANDROID_KEYSTORE_B64 != ''
-        run: |
-          SDKROOT=${{ env.ANDROID_SDK_ROOT }}
-          BT=${{ env.ANDROID_BUILD_TOOLS }}
-          unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
-          aligned_apk=app-release-aligned.apk
-          signed_apk=app-release-signed.apk
-          if [ ! -f "$unsigned_apk" ]; then
-            # try other possible names
-            unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
-          fi
-          echo "Unsigned APK: $unsigned_apk"
-          $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" "$aligned_apk"
-          $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out "$signed_apk" "$aligned_apk"
-          $SDKROOT/build-tools/$BT/apksigner verify "$signed_apk"
-          mv "$signed_apk" frontend/android/app/build/outputs/apk/release/app-release-signed.apk
-        env:
-          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
-          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+          run: |
+            if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+              SDKROOT=${{ env.ANDROID_SDK_ROOT }}
+              BT=${{ env.ANDROID_BUILD_TOOLS }}
+              unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
+              aligned_apk=app-release-aligned.apk
+              signed_apk=app-release-signed.apk
+              if [ ! -f "$unsigned_apk" ]; then
+                # try other possible names
+                unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
+              fi
+              echo "Unsigned APK: $unsigned_apk"
+              $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" "$aligned_apk"
+              $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out "$signed_apk" "$aligned_apk"
+              $SDKROOT/build-tools/$BT/apksigner verify "$signed_apk"
+              mv "$signed_apk" frontend/android/app/build/outputs/apk/release/app-release-signed.apk
+            else
+              echo "No keystore secret provided; skipping zipalign/apksigner"
+            fi
+          env:
+            ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
