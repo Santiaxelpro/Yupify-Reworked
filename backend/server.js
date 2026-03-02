@@ -594,7 +594,8 @@ app.use('/api/', limiter);
 // APIs de HiFi disponibles (del instances.json)
 const HIFI_APIS = {
   official: [
-    'https://hifi.itzsantiax.qzz.io',
+    'https://hifi-one.itzsantiax.qzz.io',
+    'https://hifi-two.itzsantiax.qzz.io',
   ],
   monochrome: [
     'https://ohio.monochrome.tf',
