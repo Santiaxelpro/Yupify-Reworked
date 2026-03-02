@@ -593,6 +593,9 @@ app.use('/api/', limiter);
 
 // APIs de HiFi disponibles (del instances.json)
 const HIFI_APIS = {
+  official: [
+    'https://hifi.itzsantiax.qzz.io',
+  ],
   monochrome: [
     'https://ohio.monochrome.tf',
     'https://virginia.monochrome.tf',
@@ -2601,6 +2604,7 @@ app.get('/api/lyrics', async (req, res) => {
     const paramsToTry = paramsVariants.slice(0, MAX_VARIANTS);
 
     const providerUrls = {
+      santiax: 'https://lyricsplus.itzsantiax.qzz.io/v2/lyrics/get',
       binimum: 'https://lyricsplus.binimum.org/v2/lyrics/get',
       prjktla: 'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get',
       atomix:  'https://lyricsplus.atomix.one/v2/lyrics/get',
