@@ -33,17 +33,17 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Setup JDK 21
-        # required because the Android Gradle plugin (and capacitor templates)
-        # set `sourceCompatibility = 21` which JDK 17 cannot handle.
+      - name: Setup JDK 11 for SDK manager
         uses: actions/setup-java@v4
+        id: jdk11
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 11
 
       - name: Install Android SDK commandline tools
         env:
           ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.jdk11.outputs.java-home }}
         run: |
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
@@ -56,6 +56,14 @@ jobs:
           fi
           yes | $RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$RUNNER_TEMP/android-sdk "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;25.2.9519653"
           yes | $RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$RUNNER_TEMP/android-sdk --licenses || true
+
+      - name: Setup JDK 21
+        # required because the Android Gradle plugin (and capacitor templates)
+        # set `sourceCompatibility = 21` which JDK 17 cannot handle.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
 
       - name: Setup Rust toolchain and targets
         uses: actions-rs/toolchain@v1

@@ -156,8 +156,11 @@ To reproduce locally, run the following from `frontend`:
 
 ```bash
 # the Android build requires **Java 21** (Gradle will refuse source release
-# 21 when using an older JDK).  Ensure your environment is configured
-# accordingly before attempting to build.
+# 21 when using an older JDK).  The Android SDK command‑line tools themselves
+# are happier with Java 11, so CI temporarily switches to JDK 11 when running
+# `sdkmanager` before upgrading to JDK 21 for the Gradle build.  Locally, make
+# sure you use JDK 21 for the build and optionally install JDK 11 if you hit
+# errors during `sdkmanager` execution.
 
 npm install # ensure @capacitor packages are available
 npm run build        # build web assets into dist/

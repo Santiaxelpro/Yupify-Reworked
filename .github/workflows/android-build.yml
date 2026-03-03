@@ -33,18 +33,21 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Setup JDK 21
-        # Capacitor/Android libraries are compiled with sourceCompatibility=21, so
-        # the runner needs JDK 21 (Gradle 8+ rejects "invalid source release: 21"
-        # when using an older JVM).
+      - name: Setup JDK 11 for SDK manager
+        # The Android command‑line tools aren't always compatible with the
+        # JDK version used for compilation; historically they require Java 8 or
+        # 11.  Using JDK 11 avoids the ClassNotFoundExceptions seen on the
+        # runner when the default JDK 21 was installed.
         uses: actions/setup-java@v4
+        id: jdk11
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 11
 
       - name: Install Android SDK commandline tools
         env:
           ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.jdk11.outputs.java-home }}
         run: |
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
@@ -55,6 +58,15 @@ jobs:
           fi
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS"
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+
+      - name: Setup JDK 21
+        # Capacitor/Android libraries are compiled with sourceCompatibility=21, so
+        # the runner needs JDK 21 (Gradle 8+ rejects "invalid source release: 21"
+        # when using an older JVM).
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
