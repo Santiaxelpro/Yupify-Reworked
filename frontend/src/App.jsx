@@ -17,7 +17,7 @@ import Navigation from './components/Navigation';
 
 // Services
 import api from './services/api';
-import { getArtistName, getLocalStorage, setLocalStorage, getTrackQualityValue } from './utils/helpers';
+import { getArtistName, getCoverUrl, getLocalStorage, setLocalStorage, getTrackQualityValue, showNotification } from './utils/helpers';
 import { setDiscordActivity, clearDiscordActivity, disconnectDiscordRpc, isTauriApp } from './utils/discordRpc';
 import { normalizeText, getTrackKey } from './utils/autoplay';
 
@@ -93,6 +93,7 @@ const App = () => {
   const durationRef = useRef(0);
   const rpcTrackIdRef = useRef(null);
   const rpcPlayingRef = useRef(false);
+  const lastNotifiedTrackIdRef = useRef(null);
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -160,11 +161,14 @@ const App = () => {
       }
     }
 
+    const coverUrl = getCoverUrl(currentTrack, 640) || getCoverUrl(currentTrack, 1280) || null;
+
     setDiscordActivity({
       details,
       state,
       startTimestamp,
       endTimestamp,
+      largeImage: coverUrl || undefined,
       largeText: 'Yupify'
     });
   }, [currentTrack, isPlaying]);
@@ -664,6 +668,30 @@ const App = () => {
     onNext: handleSkipNext,
     onPrevious: handleSkipPrevious
   });
+
+  useEffect(() => {
+    if (!currentTrack) return;
+    const trackId = currentTrack?.id ?? currentTrack?.trackId ?? null;
+    if (trackId == null) return;
+
+    const title = currentTrack.title || 'Reproduciendo';
+    const artist = getArtistName(currentTrack) || '';
+    const album = currentTrack.album?.title || currentTrack.album?.name || currentTrack.albumTitle || '';
+    const body = album && artist ? `${artist} · ${album}` : (artist || album || '');
+    const cover = getCoverUrl(currentTrack, 640) || getCoverUrl(currentTrack, 1280);
+    if (!cover) return;
+    if (lastNotifiedTrackIdRef.current === trackId) return;
+    lastNotifiedTrackIdRef.current = trackId;
+
+    showNotification(title, {
+      body,
+      icon: cover,
+      image: cover,
+      tag: 'yupify-now-playing',
+      renotify: true,
+      silent: true
+    });
+  }, [currentTrack]);
 
   // Auth handlers
   const handleLogin = async (email, password) => {

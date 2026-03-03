@@ -1,14 +1,28 @@
 // src/utils/discordRpc.js
 const isBrowser = typeof window !== 'undefined';
 
-export const isTauriApp = () => {
+const hasTauriGlobals = () => {
   if (!isBrowser) return false;
-  return Boolean(window.__TAURI__ || window.__TAURI_INTERNALS__);
+  const w = window;
+  return Boolean(
+    w.__TAURI__ ||
+    w.__TAURI_INTERNALS__ ||
+    w.__TAURI_IPC__ ||
+    w.__TAURI_METADATA__
+  );
 };
+
+const isTauriUserAgent = () => {
+  if (!isBrowser) return false;
+  const ua = navigator?.userAgent || '';
+  return /tauri/i.test(ua);
+};
+
+export const isTauriApp = () => hasTauriGlobals() || isTauriUserAgent();
 
 let invokePromise = null;
 const getInvoke = async () => {
-  if (!isTauriApp()) return null;
+  if (!isBrowser) return null;
   if (invokePromise) return invokePromise;
   invokePromise = import('@tauri-apps/api/tauri')
     .then(mod => mod.invoke)

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:tauri-frontend": "set VITE_API_URL=https://yupify-reworked.vercel.app && vite",
+    "dev:tauri-frontend": "set VITE_API_URL=https://api.itzsantiax.qzz.io && vite",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext js,jsx",

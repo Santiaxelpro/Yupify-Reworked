@@ -591,48 +591,30 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// APIs de HiFi disponibles (del instances.json)
+// APIs de HiFi disponibles (algunas antiguos estan muertas)
 const HIFI_APIS = {
   official: [
     'https://hifi-one.itzsantiax.qzz.io',
     'https://hifi-two.itzsantiax.qzz.io',
   ],
   monochrome: [
-    'https://ohio.monochrome.tf',
-    'https://virginia.monochrome.tf',
-    'https://oregon.monochrome.tf',
-    'https://california.monochrome.tf',
     'https://eu-central.monochrome.tf',
     'https://us-west.monochrome.tf',
     'https://arran.monochrome.tf',
     'https://api.monochrome.tf',
-    'https://monochrome-api.samidy.com',
-    'https://frankfurt.monochrome.tf',
-    'https://london.monochrome.tf',
-    'https://singapore.monochrome.tf',
-    'https://jakarta.monochrome.tf'
+    'https://monochrome-api.samidy.com'
   ],
   squid: [
-    'https://triton.squid.wtf',
-    'https://aether.squid.wtf',
-    'https://zeus.squid.wtf',
-    'https://kraken.squid.wtf',
-    'https://phoenix.squid.wtf',
-    'https://shiva.squid.wtf',
-    'https://chaos.squid.wtf'
+    'https://triton.squid.wtf'
   ],
-  lucida: [
+  qqdl: [
     'https://wolf.qqdl.site',
     'https://maus.qqdl.site',
     'https://vogel.qqdl.site',
     'https://katze.qqdl.site',
     'https://hund.qqdl.site'
   ],
-  primary: [
-    'https://hifi.401658.xyz'
-  ],
   community: [
-    'https://tidal-api.binimum.org',
     'https://hifi-one.spotisaver.net',
     'https://hifi-two.spotisaver.net'
   ],

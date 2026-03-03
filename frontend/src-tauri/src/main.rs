@@ -2,7 +2,9 @@
 
 use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::sync::Mutex;
+use tauri::Manager;
 
 use discord_rich_presence::{
   activity::{Activity, Assets, Timestamps},
@@ -10,9 +12,7 @@ use discord_rich_presence::{
   DiscordIpcClient,
 };
 
-static RPC_CLIENT_ID: Lazy<String> = Lazy::new(|| {
-  std::env::var("DISCORD_CLIENT_ID").unwrap_or_default()
-});
+mod media_keys;
 
 static RPC_CLIENT: Lazy<Mutex<Option<DiscordIpcClient>>> = Lazy::new(|| Mutex::new(None));
 
@@ -29,12 +29,62 @@ struct ActivityPayload {
   small_text: Option<String>,
 }
 
+fn get_client_id() -> Option<String> {
+  let raw = std::env::var("DISCORD_CLIENT_ID").ok()?;
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    None
+  } else {
+    Some(trimmed.to_string())
+  }
+}
+
+fn has_client_id() -> bool {
+  get_client_id().is_some()
+}
+
+fn load_env() {
+  let _ = dotenvy::dotenv();
+  if has_client_id() {
+    return;
+  }
+
+  if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+    let manifest_path = PathBuf::from(manifest_dir);
+    let parent = manifest_path.parent().unwrap_or(&manifest_path);
+    let grandparent = parent.parent().unwrap_or(parent);
+    let candidates = [
+      manifest_path.join(".env"),
+      parent.join(".env"),
+      grandparent.join(".env"),
+    ];
+    for path in candidates {
+      if !path.exists() {
+        continue;
+      }
+      let _ = dotenvy::from_path_override(&path);
+      if has_client_id() {
+        break;
+      }
+    }
+  }
+}
+
 fn with_rpc<F, R>(f: F) -> Result<R, String>
 where
   F: FnOnce(&mut DiscordIpcClient) -> Result<R, String>,
 {
-  let client_id = RPC_CLIENT_ID.as_str();
+  load_env();
+  let client_id = match get_client_id() {
+    Some(value) => value,
+    None => {
+      eprintln!("Discord RPC disabled: DISCORD_CLIENT_ID no configurado");
+      return Err("DISCORD_CLIENT_ID no configurado".to_string());
+    }
+  };
+
   if client_id.is_empty() {
+    eprintln!("Discord RPC disabled: DISCORD_CLIENT_ID no configurado");
     return Err("DISCORD_CLIENT_ID no configurado".to_string());
   }
 
@@ -43,11 +93,17 @@ where
     .map_err(|_| "RPC lock en mal estado".to_string())?;
 
   if guard.is_none() {
-    let mut client = DiscordIpcClient::new(client_id)
-      .map_err(|err| format!("RPC init error: {err}"))?;
+    let mut client = DiscordIpcClient::new(&client_id)
+      .map_err(|err| {
+        eprintln!("RPC init error: {err}");
+        format!("RPC init error: {err}")
+      })?;
     client
       .connect()
-      .map_err(|err| format!("RPC connect error: {err}"))?;
+      .map_err(|err| {
+        eprintln!("RPC connect error: {err}");
+        format!("RPC connect error: {err}")
+      })?;
     *guard = Some(client);
   }
 
@@ -59,6 +115,11 @@ where
 
 #[tauri::command]
 fn rpc_set_activity(payload: ActivityPayload) -> Result<(), String> {
+  eprintln!(
+    "rpc_set_activity called: details={:?} state={:?}",
+    payload.details,
+    payload.state
+  );
   with_rpc(|client| {
     let mut activity = Activity::new();
 
@@ -117,22 +178,26 @@ fn rpc_set_activity(payload: ActivityPayload) -> Result<(), String> {
     client
       .set_activity(activity)
       .map_err(|err| format!("RPC set_activity error: {err}"))?;
+    eprintln!("rpc_set_activity ok");
     Ok(())
   })
 }
 
 #[tauri::command]
 fn rpc_clear_activity() -> Result<(), String> {
+  eprintln!("rpc_clear_activity called");
   with_rpc(|client| {
     client
       .clear_activity()
       .map_err(|err| format!("RPC clear_activity error: {err}"))?;
+    eprintln!("rpc_clear_activity ok");
     Ok(())
   })
 }
 
 #[tauri::command]
 fn rpc_disconnect() -> Result<(), String> {
+  eprintln!("rpc_disconnect called");
   let mut guard = RPC_CLIENT
     .lock()
     .map_err(|_| "RPC lock en mal estado".to_string())?;
@@ -143,8 +208,17 @@ fn rpc_disconnect() -> Result<(), String> {
 }
 
 fn main() {
-  dotenvy::dotenv().ok();
+  load_env();
   tauri::Builder::default()
+    .setup(|app| {
+      media_keys::init(&app.handle());
+      if cfg!(debug_assertions) || std::env::var("YUPIFY_DEVTOOLS").as_deref() == Ok("1") {
+        if let Some(window) = app.get_window("main") {
+          window.open_devtools();
+        }
+      }
+      Ok(())
+    })
     .invoke_handler(tauri::generate_handler![
       rpc_set_activity,
       rpc_clear_activity,

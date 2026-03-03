@@ -327,10 +327,22 @@ export const showNotification = (title, options = {}) => {
   }
   
   try {
+    const {
+      track,
+      coverUrl,
+      image,
+      icon,
+      badge,
+      ...rest
+    } = options || {};
+    const coverFromTrack = track ? (getCoverUrl(track, 640) || getCoverUrl(track, 1280)) : null;
+    const resolvedIcon = icon || coverUrl || coverFromTrack || null;
+    const resolvedImage = image || coverUrl || coverFromTrack || null;
     const notification = new Notification(title, {
-      icon: '/icons/icon-192x192.png',
-      badge: '/icons/icon-72x72.png',
-      ...options
+      icon: resolvedIcon || '/icons/icon-192x192.png',
+      badge: badge || '/icons/icon-72x72.png',
+      ...(resolvedImage ? { image: resolvedImage } : {}),
+      ...rest
     });
     
     return notification;

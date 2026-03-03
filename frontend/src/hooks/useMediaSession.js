@@ -1,6 +1,7 @@
 // src/hooks/useMediaSession.js
 import { useEffect, useMemo, useRef } from 'react';
 import { getArtistName, getCoverUrl } from '../utils/helpers';
+import { isTauriApp } from '../utils/discordRpc';
 
 // Tidal only allows certain sizes (e.g. 320/640/1280). Smaller sizes return 403.
 const ART_SIZES = [320, 640, 1280];
@@ -32,6 +33,7 @@ const useMediaSession = ({
 }) => {
   const timeRef = useRef(currentTime);
   const durationRef = useRef(duration);
+  const lastMediaKeyRef = useRef(0);
 
   useEffect(() => {
     timeRef.current = currentTime;
@@ -119,6 +121,38 @@ const useMediaSession = ({
       audioRef?.current || (typeof document !== 'undefined' ? document.getElementById('yupify-audio-player') : null)
     );
 
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const ensurePlay = async () => {
+      const audio = getAudio();
+      if (!audio) return;
+      if (!audio.paused) return;
+      try {
+        await audio.play();
+        return;
+      } catch (err) {
+        // NotAllowedError can happen when the app is in background; try muted play.
+        const wasMuted = audio.muted;
+        try {
+          audio.muted = true;
+          await audio.play();
+        } catch (err2) {
+          // ignore, we'll retry once after a short delay
+        } finally {
+          audio.muted = wasMuted;
+        }
+      }
+
+      await sleep(200);
+      if (audio.paused) {
+        try {
+          await audio.play();
+        } catch (err3) {
+          console.warn('MediaSession play retry failed', err3);
+        }
+      }
+    };
+
     safeSetHandler('play', async () => {
       try {
         if (typeof onPlay === 'function') {
@@ -126,9 +160,8 @@ const useMediaSession = ({
           if (result && typeof result.then === 'function') {
             await result;
           }
-          return;
         }
-        await getAudio()?.play();
+        await ensurePlay();
       } catch (err) {
         console.warn('MediaSession play failed', err);
       }
@@ -138,7 +171,6 @@ const useMediaSession = ({
       try {
         if (typeof onPause === 'function') {
           onPause();
-          return;
         }
         getAudio()?.pause();
       } catch (err) {
@@ -252,6 +284,105 @@ const useMediaSession = ({
       window.removeEventListener('focus', handleFocus);
     };
   }, [metadata, isPlaying]);
+
+  useEffect(() => {
+    if (!isTauriApp()) return;
+    let canceled = false;
+    let unlisten = null;
+
+    const getAudio = () => (
+      audioRef?.current || (typeof document !== 'undefined' ? document.getElementById('yupify-audio-player') : null)
+    );
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const ensurePlay = async () => {
+      const audio = getAudio();
+      if (!audio) return;
+      if (!audio.paused) return;
+      try {
+        await audio.play();
+        return;
+      } catch (err) {
+        const wasMuted = audio.muted;
+        try {
+          audio.muted = true;
+          await audio.play();
+        } catch (err2) {
+          // ignore, retry below
+        } finally {
+          audio.muted = wasMuted;
+        }
+      }
+
+      await sleep(200);
+      if (audio.paused) {
+        try {
+          await audio.play();
+        } catch (err3) {
+          console.warn('Media key play retry failed', err3);
+        }
+      }
+    };
+
+    const setup = async () => {
+      try {
+        const mod = await import('@tauri-apps/api/event');
+        if (canceled) return;
+        unlisten = await mod.listen('media-key', async (event) => {
+          const action = event?.payload?.action;
+          if (!action) return;
+          const now = Date.now();
+          if (now - lastMediaKeyRef.current < 180) return;
+          lastMediaKeyRef.current = now;
+
+          if (action === 'play_pause') {
+            if (isPlaying) {
+              if (typeof onPause === 'function') onPause();
+              else getAudio()?.pause();
+              return;
+            }
+            if (typeof onPlay === 'function') {
+              const result = onPlay();
+              if (result && typeof result.then === 'function') {
+                await result;
+              }
+            }
+            await ensurePlay();
+            return;
+          }
+
+          if (action === 'next') {
+            if (typeof onNext === 'function') onNext();
+            return;
+          }
+
+          if (action === 'previous') {
+            if (typeof onPrevious === 'function') onPrevious();
+            return;
+          }
+
+          if (action === 'stop') {
+            const audio = getAudio();
+            if (!audio) return;
+            audio.pause();
+            audio.currentTime = 0;
+          }
+        });
+      } catch (err) {
+        console.warn('Media key listener failed', err);
+      }
+    };
+
+    setup();
+
+    return () => {
+      canceled = true;
+      if (typeof unlisten === 'function') {
+        unlisten();
+      }
+    };
+  }, [audioRef, onNext, onPause, onPlay, onPrevious, isPlaying]);
 };
 
 export default useMediaSession;

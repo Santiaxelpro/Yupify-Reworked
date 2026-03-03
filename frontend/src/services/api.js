@@ -4,10 +4,12 @@
 // En desarrollo por defecto apunta al backend local en http://localhost:3000
 // Puedes sobrescribir con VITE_API_URL en .env
 const DEFAULT_PROD_APIS = [
+  'https://api.itzsantiax.qzz.io/',
   'https://yupify-reworked.vercel.app/',
   'https://yupify-reworked.onrender.com/',
-  'https://api.itzsantiax.qzz.io/',
 ]
+
+const DEFAULT_PROD_API = DEFAULT_PROD_APIS[0];
 
 const normalizeApiUrl = (value) => {
   if (!value) return '';
@@ -17,6 +19,23 @@ const normalizeApiUrl = (value) => {
     url = url.slice('VITE_API_URL='.length).trim();
   }
   return url;
+};
+
+const isAbsoluteUrl = (value) => /^https?:\/\//i.test(String(value || '').trim());
+
+const joinUrl = (base, path) => {
+  if (!base) return String(path || '');
+  const baseTrim = String(base).replace(/\/+$/, '');
+  const pathTrim = String(path || '').replace(/^\/+/, '');
+  return `${baseTrim}/${pathTrim}`;
+};
+
+const resolveApiUrl = (value) => {
+  if (!value) return value;
+  const raw = String(value).trim();
+  if (!raw) return raw;
+  if (isAbsoluteUrl(raw)) return raw;
+  return joinUrl(API_URL, raw);
 };
 
 const isLocalhostUrl = (value) =>
@@ -208,9 +227,10 @@ export const trackService = {
       // Si es string XML DASH, ya debería venir la URL extraída en data.raw.url
     }
 
+    const rawUrl = streamUrl || data.raw?.url || null;
     return {
       ...data.raw,
-      url: streamUrl || data.raw?.url || null
+      url: resolveApiUrl(rawUrl)
     };
   },
 

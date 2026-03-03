@@ -45,7 +45,14 @@ const getAudioElement = () => {
   if (!audio) {
     audio = document.createElement('audio');
     audio.id = 'yupify-audio-player';
-    audio.crossOrigin = 'anonymous';
+    const protocol = typeof window !== 'undefined' ? window.location?.protocol : '';
+    const isHttp = protocol === 'http:' || protocol === 'https:';
+    if (isHttp) {
+      audio.crossOrigin = 'anonymous';
+    } else {
+      audio.removeAttribute('crossorigin');
+      audio.crossOrigin = '';
+    }
     audio.preload = 'auto';
     audio.setAttribute('playsinline', '');
     audio.setAttribute('webkit-playsinline', '');
