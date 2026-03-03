@@ -714,6 +714,141 @@ async function searchAnyAPI(query, limit = 1) {
   return uniqueItems;
 }
 
+function normalizeSearchText(value) {
+  if (!value) return '';
+  const text = String(value).toLowerCase();
+  const normalized = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return normalized
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getSearchTitle(item) {
+  if (!item) return '';
+  return (
+    item.title ||
+    item.name ||
+    item.trackTitle ||
+    item.track?.title ||
+    item.track?.name ||
+    item.data?.title ||
+    ''
+  );
+}
+
+function getSearchArtist(item) {
+  if (!item) return '';
+  if (item.artistName) return item.artistName;
+  if (item.artist?.name) return item.artist.name;
+  if (typeof item.artist === 'string') return item.artist;
+  if (Array.isArray(item.artists) && item.artists.length > 0) {
+    return item.artists.map(a => a?.name || a).filter(Boolean).join(', ');
+  }
+  if (item.track) return getArtistString(item.track);
+  return getArtistString(item);
+}
+
+function getSearchAlbum(item) {
+  if (!item) return '';
+  return (
+    item.albumTitle ||
+    item.album?.title ||
+    item.album?.name ||
+    item.albumName ||
+    ''
+  );
+}
+
+function buildSearchQueryInfo(rawQuery, kind) {
+  const normalized = normalizeSearchText(rawQuery);
+  const tokens = normalized ? normalized.split(' ').filter(Boolean) : [];
+  return { raw: rawQuery || '', normalized, tokens, kind: kind || 'track' };
+}
+
+function scoreSearchItem(item, queryInfo) {
+  if (!item || !queryInfo?.normalized) return 0;
+  const { normalized: q, tokens, kind } = queryInfo;
+
+  const title = normalizeSearchText(getSearchTitle(item));
+  const artist = normalizeSearchText(getSearchArtist(item));
+  const album = normalizeSearchText(getSearchAlbum(item));
+  const target = kind === 'artist' ? artist : kind === 'album' ? album : title;
+
+  if (!target) return 0;
+
+  let score = 0;
+  if (target === q) score += 1000;
+  if (target.startsWith(q) && target !== q) score += 600;
+  if (target.includes(q) && target !== q) score += 450;
+  if (q.includes(target) && target.length >= 3) score += 120;
+
+  if (tokens.length > 0) {
+    let matches = 0;
+    for (const t of tokens) {
+      if (t.length < 2) continue;
+      if (target.includes(t)) matches += 1;
+    }
+    score += Math.round((matches / tokens.length) * 200);
+  }
+
+  if (kind === 'track' && artist) {
+    let artistMatches = 0;
+    for (const t of tokens) {
+      if (t.length < 2) continue;
+      if (artist.includes(t)) artistMatches += 1;
+    }
+    score += Math.round((artistMatches / Math.max(1, tokens.length)) * 60);
+  }
+
+  const lenDiff = Math.abs(target.length - q.length);
+  score += Math.max(0, 40 - Math.min(40, lenDiff));
+
+  return score;
+}
+
+function rankSearchItems(items, rawQuery, kind = 'track') {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  const queryInfo = buildSearchQueryInfo(rawQuery, kind);
+  if (!queryInfo.normalized) return items;
+
+  const scored = items.map((item, index) => ({
+    item,
+    index,
+    score: scoreSearchItem(item, queryInfo)
+  }));
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.index - b.index;
+  });
+
+  return scored.map(s => s.item);
+}
+
+function applySearchRanking(payload, rawQuery, kind) {
+  if (!payload || !payload.data || !Array.isArray(payload.data.items)) return payload;
+  const ranked = rankSearchItems(payload.data.items, rawQuery, kind);
+  if (ranked === payload.data.items) return payload;
+  return {
+    ...payload,
+    data: {
+      ...payload.data,
+      items: ranked
+    }
+  };
+}
+
+function hasStrongSearchMatch(items, rawQuery, kind) {
+  if (!Array.isArray(items) || items.length === 0) return false;
+  const queryInfo = buildSearchQueryInfo(rawQuery, kind);
+  if (!queryInfo.normalized) return true;
+  return items.some(item => scoreSearchItem(item, queryInfo) >= 900);
+}
+
 async function fetchRecommendationsFromAPIs(params) {
   const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
   const requests = allAPIs.map(api =>
@@ -2225,6 +2360,9 @@ app.get('/api/search', async (req, res) => {
 
     }
 
+    const rawQuery = q || s || a || al || '';
+    const searchKind = (q || s) ? 'track' : (a ? 'artist' : (al ? 'album' : 'track'));
+
     // Si se especifica SEARCH_API en env, usar solo esa URL
     const envSearch = process.env.SEARCH_API && process.env.SEARCH_API.trim()
       ? process.env.SEARCH_API.replace(/\/+$/, '')
@@ -2232,12 +2370,20 @@ app.get('/api/search', async (req, res) => {
 
     const cacheKey = `search:${searchQuery}|li:${limit}|offset:${offset}`;
     const cached = getCache(cacheKey);
-    if (cached) return res.json(cached);
+    if (cached) {
+      const rankedCached = applySearchRanking(cached, rawQuery, searchKind);
+      if (hasStrongSearchMatch(rankedCached?.data?.items, rawQuery, searchKind)) {
+        return res.json(rankedCached);
+      }
+    }
 
     const gdriveCached = await loadSearchCacheFromGDrive(cacheKey);
     if (gdriveCached) {
-      setCache(cacheKey, gdriveCached, CACHE_TTL.search);
-      return res.json(gdriveCached);
+      const rankedGdrive = applySearchRanking(gdriveCached, rawQuery, searchKind);
+      if (hasStrongSearchMatch(rankedGdrive?.data?.items, rawQuery, searchKind)) {
+        setCache(cacheKey, rankedGdrive, CACHE_TTL.search);
+        return res.json(rankedGdrive);
+      }
     }
     if (ONLY_GOOGLE_DRIVE) {
       return res.status(404).json({
@@ -2261,24 +2407,14 @@ app.get('/api/search', async (req, res) => {
         payload = { version: remote.version || '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: 0, items: [] } };
       }
 
-      setCache(cacheKey, payload, CACHE_TTL.search);
-      saveSearchCacheToGDrive(cacheKey, payload);
-      return res.json(payload);
+      const rankedPayload = applySearchRanking(payload, rawQuery, searchKind);
+      setCache(cacheKey, rankedPayload, CACHE_TTL.search);
+      saveSearchCacheToGDrive(cacheKey, rankedPayload);
+      return res.json(rankedPayload);
     }
 
     // Por defecto: consultar todas las APIs listadas en HIFI_APIS en paralelo
     const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
-
-    const shuffledAPIs = shuffleArray(allAPIs);
-    const fastAPIs = shuffledAPIs.slice(0, FAST_SEARCH_POOL);
-    const fastRemote = await fetchFirstSearchResult({ apis: fastAPIs, searchQuery, limit, offset, timeoutMs: SEARCH_TIMEOUT_MS });
-    if (fastRemote) {
-      const items = fastRemote?.data?.items ?? fastRemote?.items ?? [];
-      const payload = { version: fastRemote.version || '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: items.length, items } };
-      setCache(cacheKey, payload, CACHE_TTL.search);
-      saveSearchCacheToGDrive(cacheKey, payload);
-      return res.json(payload);
-    }
 
     const requests = allAPIs.map(api =>
       axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
@@ -2287,17 +2423,6 @@ app.get('/api/search', async (req, res) => {
     );
 
     const responses = await Promise.all(requests);
-
-    // Buscar la primera respuesta válida que contenga items en data
-    const success = responses.find(r => r.ok && r.data && r.data.data && Array.isArray(r.data.data.items) && r.data.data.items.length > 0);
-
-    if (success) {
-      const remote = success.data;
-      const payload = { version: remote.version || '2.4', data: { limit: remote.data.limit ?? Number(limit), offset: (remote.data.offset ?? Number(offset)) || 0, totalNumberOfItems: remote.data.totalNumberOfItems ?? ((remote.data.total ?? remote.data.items.length) || 0), items: remote.data.items } };
-      setCache(cacheKey, payload, CACHE_TTL.search);
-      saveSearchCacheToGDrive(cacheKey, payload);
-      return res.json(payload);
-    }
 
     // Si no hay una respuesta clara, intentar combinar items desde todas las respuestas válidas
     const combinedItems = responses
@@ -2314,7 +2439,10 @@ app.get('/api/search', async (req, res) => {
       }
     }
 
-    const payload = { version: '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: uniqueItems.length, items: uniqueItems } };
+    const rankedItems = rankSearchItems(uniqueItems, rawQuery, searchKind);
+    const lim = Number(limit);
+    const limitedItems = Number.isFinite(lim) && lim > 0 ? rankedItems.slice(0, lim) : rankedItems;
+    const payload = { version: '2.4', data: { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: rankedItems.length, items: limitedItems } };
     setCache(cacheKey, payload, CACHE_TTL.search);
     saveSearchCacheToGDrive(cacheKey, payload);
     return res.json(payload);

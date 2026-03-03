@@ -338,6 +338,21 @@ export const useAudio = () => {
 
       console.log("✅ Audio element disponible");
 
+      const getPlayableMimes = (data) => {
+        if (!data) return [];
+        const list = [];
+        const add = (value) => {
+          if (typeof value !== 'string') return;
+          const trimmed = value.trim().toLowerCase();
+          if (!trimmed) return;
+          if (!trimmed.startsWith('audio/')) return;
+          if (!list.includes(trimmed)) list.push(trimmed);
+        };
+        add(data?.manifest?.mimeType);
+        add(data?.manifestMimeType);
+        return list;
+      };
+
       // Helper: fallback a calidades estándar (no DASH)
       const tryFallback = async () => {
         const fallbackQualities = ['LOSSLESS', 'HIGH', 'LOW'];
@@ -347,9 +362,12 @@ export const useAudio = () => {
             const presentation = String(fallbackData?.assetPresentation || '').toUpperCase();
             if (presentation === 'PREVIEW') continue;
             if (fallbackData?.manifestMimeType === 'application/dash+xml') continue;
-            if (audioElement?.canPlayType && fallbackData?.manifestMimeType) {
-              const canPlay = audioElement.canPlayType(fallbackData.manifestMimeType);
-              if (!canPlay) continue;
+            if (audioElement?.canPlayType) {
+              const mimes = getPlayableMimes(fallbackData);
+              if (mimes.length > 0) {
+                const canPlay = mimes.some((mime) => !!audioElement.canPlayType(mime));
+                if (!canPlay) continue;
+              }
             }
             if (fallbackData?.url) {
               if (shakaPlayer && typeof shakaPlayer.detach === 'function') {
@@ -469,12 +487,15 @@ export const useAudio = () => {
           if (!ok) return;
         }
 
-        if (audioElement?.canPlayType && trackData?.manifestMimeType) {
-          const canPlay = audioElement.canPlayType(trackData.manifestMimeType);
-          if (!canPlay) {
-            console.warn("⚠️ MIME no soportado:", trackData.manifestMimeType, "→ intentando fallback");
-            const ok = await tryFallback();
-            if (!ok) return;
+        if (audioElement?.canPlayType) {
+          const mimes = getPlayableMimes(trackData);
+          if (mimes.length > 0) {
+            const canPlay = mimes.some((mime) => !!audioElement.canPlayType(mime));
+            if (!canPlay) {
+              console.warn("⚠️ MIME no soportado:", mimes.join(', '), "→ intentando fallback");
+              const ok = await tryFallback();
+              if (!ok) return;
+            }
           }
         }
 

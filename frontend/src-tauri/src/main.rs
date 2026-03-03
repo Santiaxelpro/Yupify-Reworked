@@ -30,7 +30,14 @@ struct ActivityPayload {
 }
 
 fn get_client_id() -> Option<String> {
-  let raw = std::env::var("DISCORD_CLIENT_ID").ok()?;
+  if let Ok(raw) = std::env::var("DISCORD_CLIENT_ID") {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+      return Some(trimmed.to_string());
+    }
+  }
+
+  let raw = option_env!("DISCORD_CLIENT_ID")?;
   let trimmed = raw.trim();
   if trimmed.is_empty() {
     None
