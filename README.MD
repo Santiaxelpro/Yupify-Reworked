@@ -142,6 +142,40 @@ Android (ffi):
 bash scripts/build-android-ffi.sh
 ```
 
+Android (mobile):
+
+The repository does **not** track the generated Capacitor Android project.  GitHub
+Actions will run `npx cap add android` during the `android-build` workflow; if
+that step fails you may see an error like:
+
+```
+Error: gradlew not found in android/
+```
+
+To reproduce locally, run the following from `frontend`:
+
+```bash
+# the Android build requires **Java 21** (Gradle will refuse source release
+# 21 when using an older JDK).  The Android SDK command‑line tools themselves
+# are happier with Java 11, so CI temporarily switches to JDK 11 when running
+# `sdkmanager` before upgrading to JDK 21 for the Gradle build.  Locally, make
+# sure you use JDK 21 for the build and optionally install JDK 11 if you hit
+# errors during `sdkmanager` execution.
+
+npm install # ensure @capacitor packages are available
+npm run build        # build web assets into dist/
+# capacitor.config.json already specifies webDir, so no flag required
+#
+# The command will fail if `android/` already exists.  To recreate the
+# project, remove the directory first (`rm -rf android/`) and run the
+# `cap add` command again.
+
+npx cap add android
+```
+Afterwards an `android/` directory containing the Gradle wrapper will appear.
+Commit it only if you intend to maintain platform-specific changes.  Otherwise
+simply rerun the `npx cap add` command when the CI job fails.
+
 **Estructura**
 ```text
 .

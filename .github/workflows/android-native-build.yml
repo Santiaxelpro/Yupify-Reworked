@@ -33,15 +33,17 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Setup JDK 17
+      - name: Setup JDK 11 for SDK manager
         uses: actions/setup-java@v4
+        id: jdk11
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 11
 
       - name: Install Android SDK commandline tools
         env:
           ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.jdk11.outputs.java-home }}
         run: |
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
@@ -54,6 +56,14 @@ jobs:
           fi
           yes | $RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$RUNNER_TEMP/android-sdk "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;25.2.9519653"
           yes | $RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$RUNNER_TEMP/android-sdk --licenses || true
+
+      - name: Setup JDK 21
+        # required because the Android Gradle plugin (and capacitor templates)
+        # set `sourceCompatibility = 21` which JDK 17 cannot handle.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
 
       - name: Setup Rust toolchain and targets
         uses: actions-rs/toolchain@v1
@@ -83,12 +93,22 @@ jobs:
       - name: Add Android platform (ensure gradlew exists)
         working-directory: frontend
         run: |
-          # attempt to add Android platform (creates android/ and gradlew)
-          npx cap add android --web-dir=dist || true
-          # fallback: ensure platform exists
+          if [ ! -d android ]; then
+            echo "adding android platform"
+            npx cap add android
+          else
+            echo "android/ already present; skipping cap add"
+          fi
+
+          # verify the project was actually created and includes the wrapper.
           if [ ! -d android ]; then
             echo "Android platform directory missing after cap add"
             ls -la . || true
+            exit 1
+          fi
+          if [ ! -f android/gradlew ]; then
+            echo "Android directory exists but gradlew wrapper is missing"
+            ls -la android || true
             exit 1
           fi
 
@@ -138,10 +158,17 @@ jobs:
           fi
 
       - name: Zipalign + Apksigner (if keystore provided)
+        env:
+          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
-            SDKROOT=${{ env.ANDROID_SDK_ROOT }}
-            BT=${{ env.ANDROID_BUILD_TOOLS }}
+            SDKROOT=${ANDROID_SDK_ROOT:-$RUNNER_TEMP/android-sdk}
+            BT=${ANDROID_BUILD_TOOLS}
+
+            echo "SDKROOT = $SDKROOT"
+            ls -la "$SDKROOT/build-tools" || true
+
             unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
             aligned_apk=app-release-aligned.apk
             signed_apk=app-release-signed.apk
@@ -150,6 +177,12 @@ jobs:
               unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
             fi
             echo "Unsigned APK: $unsigned_apk"
+
+            if [ ! -f "$SDKROOT/build-tools/$BT/zipalign" ]; then
+              echo "zipalign binary missing at $SDKROOT/build-tools/$BT/zipalign"
+              exit 1
+            fi
+
             $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" "$aligned_apk"
             $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out "$signed_apk" "$aligned_apk"
             $SDKROOT/build-tools/$BT/apksigner verify "$signed_apk"
@@ -157,8 +190,6 @@ jobs:
           else
             echo "No keystore secret provided; skipping zipalign/apksigner"
           fi
-        env:
-          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
