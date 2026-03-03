@@ -44,7 +44,7 @@ const isLocalhostUrl = (value) =>
 const envApiUrl = normalizeApiUrl(import.meta.env.VITE_API_URL);
 let API_URL = envApiUrl || (
   import.meta.env.DEV
-    ? 'http://localhost:3000' // En local (npm run dev)
+    ? 'api.itzsantiax.qzz.io' // En local (npm run dev)
     : DEFAULT_PROD_API // En producci?n (Vercel) usa la m?scara
 );
 
