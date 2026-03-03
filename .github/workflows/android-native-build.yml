@@ -85,7 +85,8 @@ jobs:
         run: |
           # attempt to create the Android project; let failures propagate so the
           # log contains the underlying error instead of silently continuing.
-          npx cap add android --web-dir=dist
+          # Capacitor v8+ reads webDir from capacitor.config.json
+          npx cap add android
 
           # verify the project was actually created and includes the wrapper.
           if [ ! -d android ]; then

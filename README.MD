@@ -157,7 +157,8 @@ To reproduce locally, run the following from `frontend`:
 ```bash
 npm install # ensure @capacitor packages are available
 npm run build        # build web assets into dist/
-npx cap add android --web-dir=dist
+# capacitor.config.json already specifies webDir, so no flag required
+npx cap add android
 ```
 
 Afterwards an `android/` directory containing the Gradle wrapper will appear.

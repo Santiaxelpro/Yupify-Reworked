@@ -64,7 +64,8 @@ jobs:
         run: |
           # try to create the Android project; if this step fails we want the build
           # to stop immediately instead of continuing with a half-baked directory.
-          npx cap add android --web-dir=dist
+          # Capacitor v8+ reads webDir from capacitor.config.json
+          npx cap add android
 
           # If `cap add` succeeded the directory should exist and contain a
           # gradlew wrapper.  Guard against cases where the command silently
