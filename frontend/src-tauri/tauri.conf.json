@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "cd .. && set VITE_API_URL=https://api.itzsantiax.qzz.io && npm run build",
+    "beforeBuildCommand": "cd .. && set VITE_API_URL=https://api-one.yupify.qzz.io && npm run build",
     "beforeDevCommand": "npm run dev:tauri-frontend",
     "devPath": "http://localhost:5173",
     "distDir": "../dist"

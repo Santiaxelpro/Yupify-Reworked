@@ -4,7 +4,8 @@
 // En desarrollo por defecto apunta al backend local en http://localhost:3000
 // Puedes sobrescribir con VITE_API_URL en .env
 const DEFAULT_PROD_APIS = [
-  'https://api.itzsantiax.qzz.io/',
+  'https://api-one.yupify.qzz.io/',
+  'https://api-two.yupify.qzz.io/',
   'https://yupify-reworked.vercel.app/',
   'https://yupify-reworked.onrender.com/',
 ]
@@ -44,7 +45,7 @@ const isLocalhostUrl = (value) =>
 const envApiUrl = normalizeApiUrl(import.meta.env.VITE_API_URL);
 let API_URL = envApiUrl || (
   import.meta.env.DEV
-    ? 'api.itzsantiax.qzz.io' // En local (npm run dev)
+    ? 'api-one.yupify.qzz.io' // En local (npm run dev)
     : DEFAULT_PROD_API // En producci?n (Vercel) usa la m?scara
 );
 
