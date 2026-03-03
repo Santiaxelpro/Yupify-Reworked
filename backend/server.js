@@ -564,7 +564,7 @@ const isPagesDevOrigin = (origin) => {
   if (!origin) return false;
   try {
     const host = new URL(origin).hostname.toLowerCase();
-    return host.endsWith('.yupify.pages.dev');
+    return host.endsWith('.pages.dev');
   } catch {
     return false;
   }
@@ -574,6 +574,8 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:5173',
       'https://yupify-reworked.vercel.app',
+      'https://yupify.qzz.io',
+      'https://yupify.pages.dev',
       'https://yupify-reworked.onrender.com',
       'tauri://localhost',
       'https://tauri.localhost',
