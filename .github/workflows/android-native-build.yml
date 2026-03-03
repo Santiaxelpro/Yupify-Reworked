@@ -83,10 +83,12 @@ jobs:
       - name: Add Android platform (ensure gradlew exists)
         working-directory: frontend
         run: |
-          # attempt to create the Android project; let failures propagate so the
-          # log contains the underlying error instead of silently continuing.
-          # Capacitor v8+ reads webDir from capacitor.config.json
-          npx cap add android
+          if [ ! -d android ]; then
+            echo "adding android platform"
+            npx cap add android
+          else
+            echo "android/ already present; skipping cap add"
+          fi
 
           # verify the project was actually created and includes the wrapper.
           if [ ! -d android ]; then

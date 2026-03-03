@@ -62,16 +62,18 @@ jobs:
         env:
           ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
         run: |
-          # try to create the Android project; if this step fails we want the build
-          # to stop immediately instead of continuing with a half-baked directory.
-          # Capacitor v8+ reads webDir from capacitor.config.json
-          npx cap add android
+          # only add if platform does not yet exist; when a workflow step or a
+          # workspace cache leaves the `android/` directory behind `cap add`
+          # will error, which previously aborted the job.
+          if [ ! -d android ]; then
+            echo "adding android platform"
+            npx cap add android
+          else
+            echo "android/ already present; skipping cap add"
+          fi
 
-          # If `cap add` succeeded the directory should exist and contain a
-          # gradlew wrapper.  Guard against cases where the command silently
-          # succeeded but produced nothing (e.g. network error, permissions,
-          # etc.).  This mirrors the later verification step but fails earlier so
-          # the log points directly at the root cause.
+          # Verify that the directory and wrapper are present so the later
+          # build step has something to work with.
           if [ ! -d android ]; then
             echo "Android platform directory missing after cap add"
             ls -la . || true

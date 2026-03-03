@@ -158,6 +158,11 @@ To reproduce locally, run the following from `frontend`:
 npm install # ensure @capacitor packages are available
 npm run build        # build web assets into dist/
 # capacitor.config.json already specifies webDir, so no flag required
+#
+# The command will fail if `android/` already exists.  To recreate the
+# project, remove the directory first (`rm -rf android/`) and run the
+# `cap add` command again.
+
 npx cap add android
 ```
 
