@@ -560,6 +560,15 @@ let trendingState = { ts: 0, seeds: [], seedCursor: 0, items: [], seenIds: new S
 
 // Middleware
 app.use(helmet());
+const isPagesDevOrigin = (origin) => {
+  if (!origin) return false;
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host.endsWith('.yupify.pages.dev');
+  } catch {
+    return false;
+  }
+};
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
@@ -573,7 +582,7 @@ app.use(cors({
     ];
     
     // Permitir si está en la lista, si no tiene origin (server-to-server), o si es wildcard
-    if (!origin || allowedOrigins.includes(origin) || process.env.CORS_ORIGIN === '*' || process.env.CORS_ORIGIN === origin) {
+    if (!origin || allowedOrigins.includes(origin) || isPagesDevOrigin(origin) || process.env.CORS_ORIGIN === '*' || process.env.CORS_ORIGIN === origin) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));

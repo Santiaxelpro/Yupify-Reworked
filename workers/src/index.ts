@@ -103,14 +103,24 @@ function parseList(value?: string): string[] {
     .filter(Boolean);
 }
 
+function isPagesDevOrigin(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host.endsWith('.yupify.pages.dev');
+  } catch {
+    return false;
+  }
+}
+
 function isOriginAllowed(origin: string | null, env: Env): boolean {
   if (!origin) return true;
   const envList = parseList(env.CORS_ORIGIN);
   if (envList.length > 0) {
     if (envList.includes('*')) return true;
-    return envList.includes(origin);
+    if (envList.includes(origin)) return true;
+    return isPagesDevOrigin(origin);
   }
-  return DEFAULT_ALLOWED_ORIGINS.includes(origin);
+  return DEFAULT_ALLOWED_ORIGINS.includes(origin) || isPagesDevOrigin(origin);
 }
 
 function buildCorsHeaders(origin: string | null, env: Env): HeadersInit {
