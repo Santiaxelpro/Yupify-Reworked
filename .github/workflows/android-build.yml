@@ -62,12 +62,26 @@ jobs:
         env:
           ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
         run: |
-          npx cap add android --web-dir=dist || true
+          # try to create the Android project; if this step fails we want the build
+          # to stop immediately instead of continuing with a half-baked directory.
+          npx cap add android --web-dir=dist
+
+          # If `cap add` succeeded the directory should exist and contain a
+          # gradlew wrapper.  Guard against cases where the command silently
+          # succeeded but produced nothing (e.g. network error, permissions,
+          # etc.).  This mirrors the later verification step but fails earlier so
+          # the log points directly at the root cause.
           if [ ! -d android ]; then
             echo "Android platform directory missing after cap add"
             ls -la . || true
             exit 1
           fi
+          if [ ! -f android/gradlew ]; then
+            echo "Android directory exists but gradlew wrapper is missing"
+            ls -la android || true
+            exit 1
+          fi
+
           npx cap sync android
           npx cap copy android
 

@@ -83,12 +83,19 @@ jobs:
       - name: Add Android platform (ensure gradlew exists)
         working-directory: frontend
         run: |
-          # attempt to add Android platform (creates android/ and gradlew)
-          npx cap add android --web-dir=dist || true
-          # fallback: ensure platform exists
+          # attempt to create the Android project; let failures propagate so the
+          # log contains the underlying error instead of silently continuing.
+          npx cap add android --web-dir=dist
+
+          # verify the project was actually created and includes the wrapper.
           if [ ! -d android ]; then
             echo "Android platform directory missing after cap add"
             ls -la . || true
+            exit 1
+          fi
+          if [ ! -f android/gradlew ]; then
+            echo "Android directory exists but gradlew wrapper is missing"
+            ls -la android || true
             exit 1
           fi
 

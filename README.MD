@@ -142,6 +142,28 @@ Android (ffi):
 bash scripts/build-android-ffi.sh
 ```
 
+Android (mobile):
+
+The repository does **not** track the generated Capacitor Android project.  GitHub
+Actions will run `npx cap add android` during the `android-build` workflow; if
+that step fails you may see an error like:
+
+```
+Error: gradlew not found in android/
+```
+
+To reproduce locally, run the following from `frontend`:
+
+```bash
+npm install # ensure @capacitor packages are available
+npm run build        # build web assets into dist/
+npx cap add android --web-dir=dist
+```
+
+Afterwards an `android/` directory containing the Gradle wrapper will appear.
+Commit it only if you intend to maintain platform-specific changes.  Otherwise
+simply rerun the `npx cap add` command when the CI job fails.
+
 **Estructura**
 ```text
 .
