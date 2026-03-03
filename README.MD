@@ -155,6 +155,10 @@ Error: gradlew not found in android/
 To reproduce locally, run the following from `frontend`:
 
 ```bash
+# the Android build requires **Java 21** (Gradle will refuse source release
+# 21 when using an older JDK).  Ensure your environment is configured
+# accordingly before attempting to build.
+
 npm install # ensure @capacitor packages are available
 npm run build        # build web assets into dist/
 # capacitor.config.json already specifies webDir, so no flag required
@@ -165,7 +169,6 @@ npm run build        # build web assets into dist/
 
 npx cap add android
 ```
-
 Afterwards an `android/` directory containing the Gradle wrapper will appear.
 Commit it only if you intend to maintain platform-specific changes.  Otherwise
 simply rerun the `npx cap add` command when the CI job fails.

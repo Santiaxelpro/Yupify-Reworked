@@ -33,11 +33,13 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Setup JDK 17
+      - name: Setup JDK 21
+        # required because the Android Gradle plugin (and capacitor templates)
+        # set `sourceCompatibility = 21` which JDK 17 cannot handle.
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - name: Install Android SDK commandline tools
         env:
