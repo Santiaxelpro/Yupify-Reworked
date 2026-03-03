@@ -894,7 +894,7 @@ export default {
     }
 
     if (path === '/') {
-      return textResponse('Yupify API in cloudflare workers, same endpoints as https://api.itzsantiax.qzz.io without auth functions', 200, corsHeaders);
+      return textResponse('Yupify API in cloudflare workers, same endpoints as https://api-one.yupify.qzz.io without auth functions', 200, corsHeaders);
     }
 
     if (path === '/api/search' && request.method === 'GET') {
