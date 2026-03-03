@@ -139,15 +139,27 @@ jobs:
       - name: Zipalign + Apksigner (optional)
         env:
           ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
-            SDKROOT=$RUNNER_TEMP/android-sdk
+            # ensure SDKROOT is set; fall back to RUNNER_TEMP if not
+            SDKROOT=${ANDROID_SDK_ROOT:-$RUNNER_TEMP/android-sdk}
             BT=${ANDROID_BUILD_TOOLS}
+
+            echo "SDKROOT = $SDKROOT"
+            ls -la "$SDKROOT/build-tools" || true
+
             unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
             if [ ! -f "$unsigned_apk" ]; then
               unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
             fi
             echo "Unsigned APK: $unsigned_apk"
+
+            if [ ! -f "$SDKROOT/build-tools/$BT/zipalign" ]; then
+              echo "zipalign binary missing at $SDKROOT/build-tools/$BT/zipalign"
+              exit 1
+            fi
+
             $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" app-release-aligned.apk
             $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out app-release-signed.apk app-release-aligned.apk
             $SDKROOT/build-tools/$BT/apksigner verify app-release-signed.apk
