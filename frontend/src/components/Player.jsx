@@ -647,8 +647,7 @@ const Player = ({
 
   if (!currentTrack) return null;
 
-  const fallbackCover = 'https://resources.tidal.com/images/ddd75a35/5b2d/409c/abe3/7368b34f02f0/1280x1280.jpg';
-  const tidalCover = getCoverUrl(currentTrack, 1280) || fallbackCover;
+  const tidalCover = getCoverUrl(currentTrack, 640);
   const displayTitle = getTrackDisplayTitle(currentTrack);
   const availableSourceLabels = lyricsSources
     .filter((source) => source.id !== 'auto' && availableSources[source.id])
@@ -1144,7 +1143,6 @@ const Player = ({
             src={tidalCover}
             alt={displayTitle || currentTrack.title}
             className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg shadow-lg"
-            onError={(e) => (e.target.src = fallbackCover)}
           />
 
           <div className="flex-1 min-w-0">
