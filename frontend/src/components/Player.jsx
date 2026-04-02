@@ -516,6 +516,7 @@ const Player = ({
         let payload = preloadedRaw;
         if (!payload) {
           payload = await api.track.getLyrics(trackTitle, trackArtist, {
+            id: currentTrack?.id ?? currentTrack?.trackId,
             version: trackVersion,
             album: currentTrack?.album?.title || currentTrack?.albumTitle,
             duration: currentTrack?.duration
@@ -564,21 +565,29 @@ const Player = ({
         const combinedSources = getCombinedSources(cachedCombined || preloadedLyrics);
 
         if (lyricsSource === 'auto') {
-          if (combinedSources && (combinedSources.apple || combinedSources['apple'])) {
-            payload = combinedSources.apple || combinedSources['apple'];
-          } else {
-            payload = cachedCombined || preloadedLyrics;
+          if (combinedSources) {
+            const preferredCombinedSource = lyricsSources.find((source) => {
+              if (source.id === 'auto') return false;
+              if (source.id === 'musixmatch-word') {
+                return Boolean(combinedSources[source.id] || combinedSources.musixmatch);
+              }
+              return Boolean(combinedSources[source.id]);
+            });
+            if (preferredCombinedSource) {
+              payload = combinedSources[preferredCombinedSource.id]
+                || (preferredCombinedSource.id === 'musixmatch-word' ? combinedSources.musixmatch : null);
+            }
           }
+          if (!payload) payload = cachedCombined || preloadedLyrics;
           parsed = normalizeLyricsPayload(payload);
-          const sourceName = getLyricsSourceName(payload);
-          const fromApple = sourceName.includes('apple');
-          if (!payload || isLyricsEmpty(parsed) || !fromApple) {
+          if (!payload || isLyricsEmpty(parsed)) {
             payload = await api.track.getLyrics(trackTitle, trackArtist, {
-              sourceOnly: 'apple',
+              id: currentTrack?.id ?? currentTrack?.trackId,
               version: trackVersion,
               album: currentTrack?.album?.title || currentTrack?.albumTitle,
               duration: currentTrack?.duration
             });
+            combinedLyricsCacheRef.current.set(trackKey, payload?.raw ?? payload);
             parsed = normalizeLyricsPayload(payload);
           }
         } else if (combinedSources) {
@@ -589,6 +598,7 @@ const Player = ({
             parsed = normalizeLyricsPayload(payload);
           } else {
             payload = await api.track.getLyrics(trackTitle, trackArtist, {
+              id: currentTrack?.id ?? currentTrack?.trackId,
               sourceOnly: lyricsSource,
               version: trackVersion,
               album: currentTrack?.album?.title || currentTrack?.albumTitle,
@@ -598,6 +608,7 @@ const Player = ({
           }
         } else {
           payload = await api.track.getLyrics(trackTitle, trackArtist, {
+            id: currentTrack?.id ?? currentTrack?.trackId,
             sourceOnly: lyricsSource,
             version: trackVersion,
             album: currentTrack?.album?.title || currentTrack?.albumTitle,

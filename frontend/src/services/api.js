@@ -169,6 +169,26 @@ export const searchService = {
     });
 
     return handleResponse(response);
+  },
+
+  searchVideo: async (video, limit = 20) => {
+    const url = `${API_URL}/api/search?v=${encodeURIComponent(video)}&limit=${limit}`;
+
+    const response = await fetch(url, {
+      headers: getHeaders(),
+    });
+
+    return handleResponse(response);
+  },
+
+  searchPlaylist: async (playlist, limit = 20) => {
+    const url = `${API_URL}/api/search?p=${encodeURIComponent(playlist)}&limit=${limit}`;
+
+    const response = await fetch(url, {
+      headers: getHeaders(),
+    });
+
+    return handleResponse(response);
   }
 };
 
@@ -237,6 +257,9 @@ export const trackService = {
 
   getLyrics: async (title, artist, options = {}) => {
     const params = new URLSearchParams({ track: title, artist: artist });
+    if (options.id != null && options.id !== '') {
+      params.set('id', String(options.id));
+    }
     if (options.album) params.set('album', options.album);
     if (options.duration != null && options.duration !== '') {
       const durationValue = Number(options.duration);
@@ -290,6 +313,23 @@ export const trackService = {
   }
 };
 
+export const videoService = {
+  getVideo: async (videoId, quality = 'HIGH', options = {}) => {
+    const params = new URLSearchParams({
+      quality,
+      mode: String(options.mode || 'STREAM'),
+      presentation: String(options.presentation || 'FULL')
+    });
+
+    const response = await fetch(
+      `${API_URL}/api/video/${videoId}?${params.toString()}`,
+      { headers: getHeaders() }
+    );
+
+    return handleResponse(response);
+  }
+};
+
 // ==================== ÁLBUMES Y ARTISTAS ====================
 
 export const albumService = {
@@ -331,6 +371,22 @@ export const exploreService = {
   getMix: async (mixId, country = 'US') => {
     const response = await fetch(
       `${API_URL}/api/mix/${mixId}?country=${country}`,
+      { headers: getHeaders() }
+    );
+    return handleResponse(response);
+  },
+
+  // Obtener top videos
+  getTopVideos: async (limit = 12, offset = 0, options = {}) => {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+      countryCode: String(options.countryCode || 'US'),
+      locale: String(options.locale || 'en_US'),
+      deviceType: String(options.deviceType || 'BROWSER')
+    });
+    const response = await fetch(
+      `${API_URL}/api/topvideos?${params.toString()}`,
       { headers: getHeaders() }
     );
     return handleResponse(response);
@@ -598,6 +654,7 @@ export default {
   auth: authService,
   search: searchService,
   track: trackService,
+  video: videoService,
   album: albumService,
   artist: artistService,
   explore: exploreService,

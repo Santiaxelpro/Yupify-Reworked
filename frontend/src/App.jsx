@@ -1,6 +1,6 @@
 // src/App.jsx
 import React, { useState, useEffect, useRef } from 'react';
-import { Music, TrendingUp, Disc, Heart, Clock, Plus, Loader } from 'lucide-react';
+import { Music, TrendingUp, Disc, Heart, Clock, Plus, Loader, Sparkles, Clapperboard } from 'lucide-react';
 
 // Hooks
 import useAudio from './hooks/useAudio';
@@ -14,6 +14,7 @@ import TrackCard from './components/TrackCard';
 import TrackList from './components/TrackList';
 import AuthModal from './components/AuthModal';
 import Navigation from './components/Navigation';
+import VideoModal from './components/VideoModal';
 
 // Services
 import api from './services/api';
@@ -60,7 +61,16 @@ const App = () => {
 
   // Estados
   const [activeTab, setActiveTab] = useState('home');
-  const [searchResults, setSearchResults] = useState([]);
+  const [searchCategory, setSearchCategory] = useState('tracks');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchTopHit, setSearchTopHit] = useState(null);
+  const [searchResultsByType, setSearchResultsByType] = useState({
+    tracks: [],
+    artists: [],
+    albums: [],
+    videos: [],
+    playlists: []
+  });
   const [queue, setQueue] = useState([]);
   const playedRef = useRef(new Set());
   const playedTitleRef = useRef(new Set());
@@ -74,8 +84,14 @@ const App = () => {
   const [trendingTracks, setTrendingTracks] = useState([]);
   const [trendingLoading, setTrendingLoading] = useState(false);
   const [trendingHasMore, setTrendingHasMore] = useState(true);
+  const [recommendedTracks, setRecommendedTracks] = useState([]);
+  const [recommendedLoading, setRecommendedLoading] = useState(false);
+  const [topVideos, setTopVideos] = useState([]);
+  const [topVideosLoading, setTopVideosLoading] = useState(false);
   const [myPlaylists, setMyPlaylists] = useState([]);
   const [history, setHistory] = useState([]);
+  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [videoModalOpen, setVideoModalOpen] = useState(false);
 
   // Estados UI
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -182,12 +198,17 @@ const App = () => {
   // Cargar datos al iniciar
   useEffect(() => {
     loadTrending(true);
+    loadTopVideos();
     if (isAuthenticated) {
       loadUserData();
     } else {
       loadGuestHistory();
     }
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    loadRecommended();
+  }, [currentTrack?.id]);
 
   const TRENDING_LIMIT = 20;
   const loadTrending = async (reset = false) => {
@@ -234,6 +255,43 @@ const App = () => {
     } finally {
       trendingLoadingRef.current = false;
       setTrendingLoading(false);
+    }
+  };
+
+  const loadRecommended = async () => {
+    const trackId = currentTrack?.id ?? currentTrack?.trackId;
+    if (!trackId) {
+      setRecommendedTracks([]);
+      return;
+    }
+
+    setRecommendedLoading(true);
+    try {
+      const data = await api.recommendations.getRecommendations(trackId, 12, 0);
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const normalized = items
+        .map((item) => (item && item.track ? item.track : item))
+        .filter((item) => item && (item.id != null || item.trackId != null));
+      setRecommendedTracks(normalized);
+    } catch (err) {
+      console.error('Error cargando recomendaciones:', err);
+      setRecommendedTracks([]);
+    } finally {
+      setRecommendedLoading(false);
+    }
+  };
+
+  const loadTopVideos = async () => {
+    setTopVideosLoading(true);
+    try {
+      const data = await api.explore.getTopVideos(10, 0);
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setTopVideos(items.filter(Boolean));
+    } catch (err) {
+      console.error('Error cargando top videos:', err);
+      setTopVideos([]);
+    } finally {
+      setTopVideosLoading(false);
     }
   };
 
@@ -295,9 +353,67 @@ const App = () => {
   // Búsqueda
   const handleSearch = async (query) => {
     setLoading(true);
+    setError(null);
     try {
-      const results = await api.search.search(query, 50);
-      setSearchResults(results.items || []);
+      const trimmedQuery = String(query || '').trim();
+      if (!trimmedQuery) {
+        setSearchResultsByType({
+          tracks: [],
+          artists: [],
+          albums: [],
+          videos: [],
+          playlists: []
+        });
+        setSearchTopHit(null);
+        setSearchQuery('');
+        setActiveTab('search');
+        return;
+      }
+
+      const globalResult = await api.search.search(trimmedQuery, 25);
+      const sections = globalResult?.raw?.sections;
+
+      if (sections && typeof sections === 'object') {
+        setSearchTopHit(globalResult?.raw?.topHit?.value || null);
+        setSearchResultsByType({
+          tracks: Array.isArray(sections?.tracks?.items) ? sections.tracks.items : [],
+          artists: Array.isArray(sections?.artists?.items) ? sections.artists.items : [],
+          albums: Array.isArray(sections?.albums?.items) ? sections.albums.items : [],
+          videos: Array.isArray(sections?.videos?.items) ? sections.videos.items : [],
+          playlists: Array.isArray(sections?.playlists?.items) ? sections.playlists.items : []
+        });
+      } else {
+        setSearchTopHit(null);
+        const [
+          tracksResult,
+          artistsResult,
+          albumsResult,
+          videosResult,
+          playlistsResult
+        ] = await Promise.allSettled([
+          Promise.resolve(globalResult),
+          api.search.searchArtist(trimmedQuery, 24),
+          api.search.searchAlbum(trimmedQuery, 24),
+          api.search.searchVideo(trimmedQuery, 24),
+          api.search.searchPlaylist(trimmedQuery, 24)
+        ]);
+
+        const getItems = (result) => (
+          result.status === 'fulfilled' && Array.isArray(result.value?.items)
+            ? result.value.items
+            : []
+        );
+
+        setSearchResultsByType({
+          tracks: getItems(tracksResult),
+          artists: getItems(artistsResult),
+          albums: getItems(albumsResult),
+          videos: getItems(videosResult),
+          playlists: getItems(playlistsResult)
+        });
+      }
+
+      setSearchQuery(trimmedQuery);
       setActiveTab('search');
     } catch (err) {
       setError('Error en la búsqueda');
@@ -474,6 +590,7 @@ const App = () => {
     const trackVersion = typeof currentTrack?.version === 'string' ? currentTrack.version.trim() : '';
     api.track
       .getLyrics(currentTrack.title, getArtistName(currentTrack), {
+        id: currentTrack?.id ?? currentTrack?.trackId,
         version: trackVersion,
         album: currentTrack?.album?.title || currentTrack?.albumTitle,
         duration: currentTrack?.duration
@@ -591,6 +708,52 @@ const App = () => {
       console.error('Error descargando track:', err);
     } finally {
       downloadInFlightRef.current = false;
+    }
+  };
+
+  const handleOpenVideo = (video) => {
+    if (!video) return;
+    pauseWithFade();
+    setSelectedVideo(video);
+    setVideoModalOpen(true);
+  };
+
+  const handleSearchResultAction = async (item) => {
+    if (!item) return;
+    if (searchCategory === 'tracks') {
+      handlePlayTrack(item, { source: 'search', action: 'manual_select' });
+      return;
+    }
+
+    if (searchCategory === 'artists') {
+      const artistQuery = item.name || item.title || getArtistName(item);
+      if (artistQuery) {
+        setSearchCategory('tracks');
+        await handleSearch(artistQuery);
+      }
+      return;
+    }
+
+    if (searchCategory === 'albums') {
+      const albumQuery = item.title || item.name;
+      if (albumQuery) {
+        setSearchCategory('tracks');
+        await handleSearch(albumQuery);
+      }
+      return;
+    }
+
+    if (searchCategory === 'videos') {
+      handleOpenVideo(item);
+      return;
+    }
+
+    if (searchCategory === 'playlists') {
+      const playlistQuery = item.title || item.name;
+      if (playlistQuery) {
+        setSearchCategory('tracks');
+        await handleSearch(playlistQuery);
+      }
     }
   };
 
@@ -767,6 +930,25 @@ const App = () => {
   const historyTracks = Array.isArray(history)
     ? history.map(normalizeHistoryTrack).filter(Boolean)
     : [];
+  const searchResults = Array.isArray(searchResultsByType?.[searchCategory])
+    ? searchResultsByType[searchCategory]
+    : [];
+  const searchCategoryLabels = {
+    tracks: 'Canciones',
+    artists: 'Artistas',
+    albums: 'Álbumes',
+    videos: 'Videos',
+    playlists: 'Playlists'
+  };
+  const searchCounts = {
+    tracks: searchResultsByType.tracks.length,
+    artists: searchResultsByType.artists.length,
+    albums: searchResultsByType.albums.length,
+    videos: searchResultsByType.videos.length,
+    playlists: searchResultsByType.playlists.length
+  };
+  const homeRecommendedTracks = Array.isArray(recommendedTracks) ? recommendedTracks.slice(0, 10) : [];
+  const homeTopVideos = Array.isArray(topVideos) ? topVideos.slice(0, 10) : [];
 
   const lyricsKey = getLyricsKey(currentTrack);
   const preloadedLyrics = lyricsKey ? lyricsCache[lyricsKey] : null;
@@ -823,7 +1005,14 @@ const App = () => {
         )}
         
         <div className="lg:pl-64">
-          <SearchBar onSearch={handleSearch} loading={loading} />
+          <SearchBar
+            onSearch={handleSearch}
+            loading={loading}
+            activeCategory={searchCategory}
+            onCategoryChange={setSearchCategory}
+            query={searchQuery}
+            counts={searchCounts}
+          />
         </div>
       </div>
 
@@ -862,25 +1051,119 @@ const App = () => {
                   <p className="text-gray-400 text-lg">Usa la búsqueda para descubrir música</p>
                 </div>
               )}
+
+              {(recommendedLoading || homeRecommendedTracks.length > 0) && (
+                <section>
+                  <div className="flex items-center gap-2 mb-4">
+                    <Sparkles className="text-cyan-400" size={24} />
+                    <h2 className="text-2xl font-bold">Recomendados Para Ti</h2>
+                  </div>
+                  <p className="text-sm text-gray-400 mb-4">
+                    Basado en la canción que tienes seleccionada ahora.
+                  </p>
+                  {recommendedLoading ? (
+                    <div className="flex justify-center py-6">
+                      <Loader className="animate-spin text-cyan-400" size={28} />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                      {homeRecommendedTracks.map((track) => (
+                        <TrackCard
+                          key={track.id || track.trackId}
+                          track={track}
+                          onPlay={handlePlayTrack}
+                          onToggleFavorite={handleToggleFavorite}
+                          onDownload={handleDownloadTrack}
+                          isFavorite={favorites.some(f => f.id === track.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {(topVideosLoading || homeTopVideos.length > 0) && (
+                <section>
+                  <div className="flex items-center gap-2 mb-4">
+                    <Clapperboard className="text-amber-400" size={24} />
+                    <h2 className="text-2xl font-bold">Top Videos</h2>
+                  </div>
+                  <p className="text-sm text-gray-400 mb-4">
+                    Toca cualquier video para abrirlo y reproducirlo dentro de Yupify.
+                  </p>
+                  {topVideosLoading ? (
+                    <div className="flex justify-center py-6">
+                      <Loader className="animate-spin text-amber-400" size={28} />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                      {homeTopVideos.map((video, index) => (
+                        <TrackCard
+                          key={video.id || video.videoId || index}
+                          track={video}
+                          onPlay={handleOpenVideo}
+                          isFavorite={false}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
           )}
 
           {activeTab === 'search' && (
             <div>
-              <h2 className="text-2xl font-bold mb-4">Resultados de Búsqueda</h2>
+              <div className="mb-4">
+                <h2 className="text-2xl font-bold">
+                  {searchQuery ? `Resultados para "${searchQuery}"` : 'Resultados de búsqueda'}
+                </h2>
+                <p className="text-sm text-gray-400 mt-1">
+                  Apartado activo: {searchCategoryLabels[searchCategory] || 'Canciones'}
+                </p>
+              </div>
+              {searchTopHit && (
+                <section className="mb-6">
+                  <h3 className="text-sm uppercase tracking-[0.3em] text-gray-500 mb-3">Mejor Resultado</h3>
+                  <div className="max-w-sm">
+                    <TrackCard
+                      track={searchTopHit}
+                      onPlay={handleSearchResultAction}
+                      onToggleFavorite={searchCategory === 'tracks' ? handleToggleFavorite : null}
+                      onDownload={searchCategory === 'tracks' ? handleDownloadTrack : null}
+                      isFavorite={favorites.some(f => f.id === searchTopHit.id)}
+                    />
+                  </div>
+                </section>
+              )}
               {loading ? (
                 <div className="flex justify-center py-12">
                   <Loader className="animate-spin text-[#1db954]" size={48} />
                 </div>
               ) : searchResults.length > 0 ? (
-                <TrackList
-                  tracks={searchResults}
-                  onPlay={handlePlayTrack}
-                  onToggleFavorite={handleToggleFavorite}
-                  onDownload={handleDownloadTrack}
-                  favorites={favorites}
-                  currentTrackId={currentTrack?.id}
-                />
+                searchCategory === 'tracks' ? (
+                  <TrackList
+                    tracks={searchResults}
+                    onPlay={handlePlayTrack}
+                    onToggleFavorite={handleToggleFavorite}
+                    onDownload={handleDownloadTrack}
+                    favorites={favorites}
+                    currentTrackId={currentTrack?.id}
+                  />
+                ) : (
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                    {searchResults.map((item, index) => (
+                      <TrackCard
+                        key={item.id || item.uuid || item.trackId || index}
+                        track={item}
+                        onPlay={handleSearchResultAction}
+                        onToggleFavorite={searchCategory === 'tracks' ? handleToggleFavorite : null}
+                        onDownload={searchCategory === 'tracks' ? handleDownloadTrack : null}
+                        isFavorite={favorites.some(f => f.id === item.id)}
+                      />
+                    ))}
+                  </div>
+                )
               ) : (
                 <p className="text-gray-400 text-center py-12">
                   No se encontraron resultados
@@ -1053,6 +1336,15 @@ const App = () => {
   quality={quality}
   onChangeQuality={setQuality}
 />
+
+      <VideoModal
+        isOpen={videoModalOpen}
+        video={selectedVideo}
+        onClose={() => {
+          setVideoModalOpen(false);
+          setSelectedVideo(null);
+        }}
+      />
 
       {/* Auth Modal */}
       <AuthModal
