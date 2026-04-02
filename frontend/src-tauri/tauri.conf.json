@@ -1,0 +1,33 @@
+{
+  "build": {
+    "beforeBuildCommand": "cd .. && npm run build",
+    "beforeDevCommand": "npm run dev:tauri-frontend",
+    "devPath": "http://localhost:5173",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "Yupify",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: https: data: blob:; media-src 'self' asset: https: http: data: blob:; connect-src 'self' https: http: ws: wss:; script-src 'self' https: 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
+    },
+    "bundle": {
+      "active": true,
+      "targets": ["nsis"],
+      "identifier": "com.yupify.app",
+      "icon": ["icons/icon.ico"]
+    },
+    "allowlist": {
+      "all": false
+    },
+    "windows": [
+      {
+        "title": "Yupify",
+        "width": 1200,
+        "height": 800
+      }
+    ]
+  }
+}

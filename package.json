@@ -1,0 +1,85 @@
+{
+  "name": "yupify",
+  "version": "1.0.0",
+  "description": "Yupify - Music Streaming Application",
+  "main": "electron-main.js",
+  "homepage": "./",
+  "license": "Apache-2.0",
+  "author": "Yupify Team",
+  "scripts": {
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:electron": "electron .",
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && npm install && npm start",
+    "build": "npm run build:frontend",
+    "electron": "electron .",
+    "electron-dev": "concurrently \"npm run dev:frontend\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron-build": "npm run build:frontend && electron-builder",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "wait-on": "^7.0.1"
+  },
+  "build": {
+    "appId": "com.yupify.app",
+    "productName": "Yupify",
+    "directories": {
+      "buildResources": "frontend/public",
+      "output": "release"
+    },
+    "files": [
+      "electron-main.js",
+      "electron-preload.js",
+      "frontend/dist/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "frontend/public/favicon.ico",
+      "certificateFile": null,
+      "certificatePassword": null,
+      "signingHashAlgorithms": [
+        "sha256"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "frontend/public/favicon.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "frontend/public/favicon.ico"
+    }
+  }
+}

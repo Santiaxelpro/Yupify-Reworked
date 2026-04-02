@@ -1,0 +1,24 @@
+[package]
+name = "yupify"
+version = "1.0.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+dotenvy = "0.15"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "1.5", features = ["devtools"] }
+discord-rich-presence = "0.2"
+once_cell = "1.19"
+dotenvy = "0.15"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging"
+] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

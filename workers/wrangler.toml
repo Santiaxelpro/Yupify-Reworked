@@ -1,0 +1,10 @@
+﻿name = "yupify-worker"
+main = "src/index.ts"
+compatibility_date = "2026-03-01"
+
+# Optional env vars:
+# SEARCH_API = "https://..."
+# HIFI_APIS = "https://api1,..."
+# CORS_ORIGIN = "*" or "https://your-domain"
+# LYRICS_MULTI_PROVIDER = "binimum"
+# BACKEND_URL = "https://api-one.yupify.qzz.io"

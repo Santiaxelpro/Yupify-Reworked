@@ -1,0 +1,198 @@
+name: Build Android APK (native Rust libs)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API_LEVEL: 33
+      ANDROID_BUILD_TOOLS: "33.0.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Ensure Capacitor packages installed
+        working-directory: frontend
+        run: |
+          npm install @capacitor/core@latest @capacitor/android@latest --no-save
+
+      - name: Build web (Vite)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Setup JDK 11 for SDK manager
+        uses: actions/setup-java@v4
+        id: jdk11
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Install Android SDK commandline tools
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.jdk11.outputs.java-home }}
+        run: |
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip -q /tmp/cmdline.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mkdir -p $RUNNER_TEMP/android-sdk/cmdline-tools
+          curl -o /tmp/cmdline.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip -q /tmp/cmdline.zip -d $RUNNER_TEMP/android-sdk/cmdline-tools
+          if [ -d "$RUNNER_TEMP/android-sdk/cmdline-tools/cmdline-tools" ]; then
+            mv "$RUNNER_TEMP/android-sdk/cmdline-tools/cmdline-tools" "$RUNNER_TEMP/android-sdk/cmdline-tools/latest"
+          fi
+          yes | $RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$RUNNER_TEMP/android-sdk "platform-tools" "platforms;android-$ANDROID_API_LEVEL" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;25.2.9519653"
+          yes | $RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$RUNNER_TEMP/android-sdk --licenses || true
+
+      - name: Setup JDK 21
+        # required because the Android Gradle plugin (and capacitor templates)
+        # set `sourceCompatibility = 21` which JDK 17 cannot handle.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust toolchain and targets
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Add Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build native Rust libraries for Android
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+        run: |
+          chmod +x scripts/build-android-ffi.sh
+          ./scripts/build-android-ffi.sh
+
+      - name: Install Capacitor CLI
+        run: npm install -g @capacitor/cli
+        working-directory: frontend
+
+      - name: Add Android platform (ensure gradlew exists)
+        working-directory: frontend
+        run: |
+          if [ ! -d android ]; then
+            echo "adding android platform"
+            npx cap add android
+          else
+            echo "android/ already present; skipping cap add"
+          fi
+
+          # verify the project was actually created and includes the wrapper.
+          if [ ! -d android ]; then
+            echo "Android platform directory missing after cap add"
+            ls -la . || true
+            exit 1
+          fi
+          if [ ! -f android/gradlew ]; then
+            echo "Android directory exists but gradlew wrapper is missing"
+            ls -la android || true
+            exit 1
+          fi
+
+      - name: Verify Android project and gradlew
+        working-directory: frontend
+        run: |
+          echo "Listing frontend/android"
+          ls -la android || true
+          if [ ! -f android/gradlew ]; then
+            echo "Error: gradlew not found in android/"
+            ls -la android || true
+            exit 1
+          fi
+
+      - name: Sync Android project (Capacitor)
+        working-directory: frontend
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+        run: |
+          npx cap sync android
+          npx cap copy android
+
+      - name: Ensure ABI libs placed
+        run: ls -la frontend/android/app/src/main/jniLibs || true
+
+      - name: Build release APK
+        env:
+          ANDROID_SDK_ROOT: $RUNNER_TEMP/android-sdk
+          JAVA_HOME: ${{ steps.setup-java.outputs.java-home }}
+        run: |
+          cd frontend/android
+          chmod +x ./gradlew
+          ./gradlew assembleRelease -Pandroid.injected.testOnly=false
+
+      - name: Prepare keystore and signing env (optional)
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            echo "Decoding keystore"
+            mkdir -p frontend/android/app
+            echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > frontend/android/app/my-release-key.jks
+            echo "Keystore written: frontend/android/app/my-release-key.jks"
+            echo "RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "No keystore secret provided; skipping keystore preparation"
+          fi
+
+      - name: Zipalign + Apksigner (if keystore provided)
+        env:
+          ANDROID_BUILD_TOOLS: ${{ env.ANDROID_BUILD_TOOLS }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            SDKROOT=${ANDROID_SDK_ROOT:-$RUNNER_TEMP/android-sdk}
+            BT=${ANDROID_BUILD_TOOLS}
+
+            echo "SDKROOT = $SDKROOT"
+            ls -la "$SDKROOT/build-tools" || true
+
+            unsigned_apk=frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
+            aligned_apk=app-release-aligned.apk
+            signed_apk=app-release-signed.apk
+            if [ ! -f "$unsigned_apk" ]; then
+              # try other possible names
+              unsigned_apk=$(ls frontend/android/app/build/outputs/apk/release/*release*.apk | head -n 1 || true)
+            fi
+            echo "Unsigned APK: $unsigned_apk"
+
+            if [ ! -f "$SDKROOT/build-tools/$BT/zipalign" ]; then
+              echo "zipalign binary missing at $SDKROOT/build-tools/$BT/zipalign"
+              exit 1
+            fi
+
+            $SDKROOT/build-tools/$BT/zipalign -v -p 4 "$unsigned_apk" "$aligned_apk"
+            $SDKROOT/build-tools/$BT/apksigner sign --ks frontend/android/app/my-release-key.jks --ks-pass pass:$RELEASE_STORE_PASSWORD --key-pass pass:$RELEASE_KEY_PASSWORD --out "$signed_apk" "$aligned_apk"
+            $SDKROOT/build-tools/$BT/apksigner verify "$signed_apk"
+            mv "$signed_apk" frontend/android/app/build/outputs/apk/release/app-release-signed.apk
+          else
+            echo "No keystore secret provided; skipping zipalign/apksigner"
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: yupify-native-apk
+          path: frontend/android/app/build/outputs/apk/release/*.apk
