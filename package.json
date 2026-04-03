@@ -4,7 +4,7 @@
   "description": "Yupify - Music Streaming Application",
   "main": "electron-main.js",
   "homepage": "./",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "author": "Yupify Team",
   "scripts": {
     "dev:frontend": "cd frontend && npm run dev",
