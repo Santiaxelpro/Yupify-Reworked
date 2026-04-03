@@ -191,4 +191,3 @@ simply rerun the `npx cap add` command when the CI job fails.
 **Notas**
 - El backend lee `.env` en `backend/` y tambien `/etc/secrets/.env` si existe.
 - Si quieres Electron, crea los entrypoints `electron-main.js` y `electron-preload.js` o ajusta `package.json`.
-- No hay `LICENSE` en el repo; en `package.json` raiz figura `Apache-2.0` y en `backend/package.json` `MIT`.
