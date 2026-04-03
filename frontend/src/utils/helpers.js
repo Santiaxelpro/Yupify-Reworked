@@ -261,7 +261,7 @@ export const validateEmail = (email) => {
 /**
  * Obtener color dominante de imagen (simplificado)
  */
-export const getDominantColor = (imageUrl) => {
+export const getDominantColor = () => {
   // Retorna colores por defecto
   // En producción, usar una librería como color-thief
   const colors = [

@@ -15,7 +15,7 @@ const Navigation = ({
   setQuality
 }) => {
   
-  const NavButton = ({ icon: Icon, label, tab }) => (
+  const NavButton = ({ icon, label, tab }) => (
     <button
       onClick={() => onTabChange(tab)}
       className={`flex flex-col md:flex-row items-center gap-1 md:gap-3 px-4 py-2 rounded-lg transition-all ${
@@ -24,7 +24,7 @@ const Navigation = ({
           : 'text-gray-400 hover:text-white hover:bg-gray-900'
       }`}
     >
-      <Icon size={24} />
+      {React.createElement(icon, { size: 24 })}
       <span className="text-xs md:text-sm font-medium">{label}</span>
     </button>
   );

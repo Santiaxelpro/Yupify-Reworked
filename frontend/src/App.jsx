@@ -1,6 +1,6 @@
 // src/App.jsx
 import React, { useState, useEffect, useRef } from 'react';
-import { Music, TrendingUp, Disc, Heart, Clock, Plus, Loader, Sparkles, Clapperboard } from 'lucide-react';
+import { Music, TrendingUp, Disc, Heart, Clock, Plus, Loader, Sparkles, Clapperboard, ArrowLeft, Flame, UserRound, Library } from 'lucide-react';
 
 // Hooks
 import useAudio from './hooks/useAudio';
@@ -83,11 +83,14 @@ const App = () => {
   const [favorites, setFavorites] = useState([]);
   const [trendingTracks, setTrendingTracks] = useState([]);
   const [trendingLoading, setTrendingLoading] = useState(false);
-  const [trendingHasMore, setTrendingHasMore] = useState(true);
+  const [, setTrendingHasMore] = useState(true);
   const [recommendedTracks, setRecommendedTracks] = useState([]);
   const [recommendedLoading, setRecommendedLoading] = useState(false);
   const [topVideos, setTopVideos] = useState([]);
   const [topVideosLoading, setTopVideosLoading] = useState(false);
+  const [artistView, setArtistView] = useState(null);
+  const [artistViewLoading, setArtistViewLoading] = useState(false);
+  const [artistViewError, setArtistViewError] = useState(null);
   const [myPlaylists, setMyPlaylists] = useState([]);
   const [history, setHistory] = useState([]);
   const [selectedVideo, setSelectedVideo] = useState(null);
@@ -718,23 +721,210 @@ const App = () => {
     setVideoModalOpen(true);
   };
 
+  const dedupeItemsById = (items = []) => {
+    const seen = new Set();
+    const output = [];
+    items.forEach((item) => {
+      if (!item) return;
+      const key = item.id ?? item.trackId ?? item.uuid ?? `${item.title}:${getArtistName(item)}`;
+      if (key == null) return;
+      const normalizedKey = String(key);
+      if (seen.has(normalizedKey)) return;
+      seen.add(normalizedKey);
+      output.push(item);
+    });
+    return output;
+  };
+
+  const extractArtistCoverUrl = (artistPayload, coverPayload) => {
+    const directCover = [
+      coverPayload?.['1080'],
+      coverPayload?.['750'],
+      coverPayload?.url,
+      artistPayload?.cover,
+      artistPayload?.image
+    ].find((value) => typeof value === 'string' && value.startsWith('http'));
+
+    if (directCover) return directCover;
+
+    const picture = typeof artistPayload?.picture === 'string' ? artistPayload.picture.trim() : '';
+    if (!picture) return null;
+    return `https://resources.tidal.com/images/${picture.replace(/-/g, '/')}/750x750.jpg`;
+  };
+
+  const matchesArtistIdentity = (item, artistId, artistName) => {
+    if (!item) return false;
+
+    const targetName = normalizeText(artistName || '');
+    const candidateArtists = Array.isArray(item.artists) ? item.artists : [];
+
+    if (artistId != null) {
+      const targetId = String(artistId);
+      if (candidateArtists.some((artist) => String(artist?.id ?? '') === targetId)) {
+        return true;
+      }
+      if (String(item?.id ?? '') === targetId && String(item?.type || '').toLowerCase() === 'artist') {
+        return true;
+      }
+    }
+
+    const candidateNames = [
+      typeof item?.name === 'string' ? item.name : null,
+      typeof item?.title === 'string' ? item.title : null,
+      typeof item?.artist === 'string' ? item.artist : null,
+      item?.artist?.name,
+      ...candidateArtists.map((artist) => artist?.name || artist)
+    ].filter(Boolean);
+
+    return candidateNames.some((name) => normalizeText(name) === targetName);
+  };
+
+  const openArtistProfile = async (artistItem) => {
+    if (!artistItem?.id && !artistItem?.name && !artistItem?.title) return;
+
+    const fallbackName = artistItem?.name || artistItem?.title || getArtistName(artistItem);
+    const fallbackCover = getCoverUrl(artistItem, 750);
+
+    setActiveTab('artist');
+    setArtistViewLoading(true);
+    setArtistViewError(null);
+    setArtistView((prev) => ({
+      artist: {
+        id: artistItem?.id ?? prev?.artist?.id ?? null,
+        name: fallbackName || prev?.artist?.name || 'Artista',
+        popularity: artistItem?.popularity ?? prev?.artist?.popularity ?? null
+      },
+      coverUrl: fallbackCover || prev?.coverUrl || null,
+      tracks: prev?.tracks || [],
+      albums: prev?.albums || [],
+      videos: prev?.videos || [],
+      mixTitle: prev?.mixTitle || '',
+      mixSubtitle: prev?.mixSubtitle || '',
+      topHit: prev?.topHit || null
+    }));
+
+    try {
+      const [artistResult, globalSearchResult] = await Promise.all([
+        api.artist.getArtist(artistItem.id, true).catch(() => api.artist.getArtist(artistItem.id, false)),
+        api.search.search(fallbackName, 50)
+      ]);
+
+      const artistPayload = artistResult?.raw?.artist || artistResult?.raw || artistItem;
+      const artistName = artistPayload?.name || fallbackName || 'Artista';
+      const artistId = artistPayload?.id ?? artistItem?.id ?? null;
+      const sections = globalSearchResult?.raw?.sections || {};
+      const tracksBucket = Array.isArray(sections?.tracks?.items) ? sections.tracks.items : globalSearchResult?.items || [];
+      const albumsBucket = Array.isArray(sections?.albums?.items) ? sections.albums.items : [];
+      const videosBucket = Array.isArray(sections?.videos?.items) ? sections.videos.items : [];
+
+      const filteredTracks = dedupeItemsById(
+        tracksBucket.filter((track) => matchesArtistIdentity(track, artistId, artistName))
+      );
+      const filteredAlbums = dedupeItemsById(
+        albumsBucket.filter((album) => matchesArtistIdentity(album, artistId, artistName))
+      );
+      const filteredVideos = dedupeItemsById(
+        videosBucket.filter((video) => matchesArtistIdentity(video, artistId, artistName))
+      );
+
+      let mixResult = null;
+      const mixId = artistPayload?.mixes?.ARTIST_MIX;
+      if (mixId) {
+        try {
+          mixResult = await api.explore.getMix(mixId);
+        } catch (mixError) {
+          console.error('Error cargando mix del artista:', mixError);
+        }
+      }
+
+      const mixItems = Array.isArray(mixResult?.items) ? dedupeItemsById(mixResult.items) : [];
+
+      setArtistView({
+        artist: artistPayload,
+        coverUrl: extractArtistCoverUrl(artistPayload, artistResult?.raw?.cover) || fallbackCover,
+        tracks: (mixItems.length > 0 ? mixItems : filteredTracks).slice(0, 10),
+        albums: filteredAlbums.slice(0, 12),
+        videos: filteredVideos.slice(0, 8),
+        mixTitle: mixResult?.raw?.mix?.title || artistName,
+        mixSubtitle: mixResult?.raw?.mix?.subTitle || 'Canciones destacadas',
+        topHit: globalSearchResult?.raw?.topHit?.value || null
+      });
+    } catch (err) {
+      console.error('Error cargando perfil del artista:', err);
+      setArtistViewError('No se pudo cargar el perfil del artista');
+    } finally {
+      setArtistViewLoading(false);
+    }
+  };
+
+  const handleArtistSelection = async (item) => {
+    if (!item) return;
+
+    if (String(item?.type || '').toLowerCase() === 'artist') {
+      await openArtistProfile(item);
+      return;
+    }
+
+    const candidate = Array.isArray(item?.artists) && item.artists.length > 0
+      ? item.artists[0]
+      : item?.artist;
+
+    if (candidate && (candidate.id != null || candidate.name)) {
+      await openArtistProfile({
+        id: candidate.id ?? null,
+        name: candidate.name || candidate,
+        type: 'artist',
+        popularity: candidate.popularity ?? null,
+        picture: candidate.picture ?? null
+      });
+      return;
+    }
+
+    const artistName = getArtistName(item);
+    if (!artistName || artistName === 'Artista Desconocido') return;
+
+    try {
+      const result = await api.search.searchArtist(artistName, 10);
+      const exact = (result?.items || []).find((artist) => normalizeText(artist?.name || artist?.title || '') === normalizeText(artistName));
+      if (exact) {
+        await openArtistProfile(exact);
+      }
+    } catch (err) {
+      console.error('Error resolviendo artista:', err);
+    }
+  };
+
+  const getSearchItemType = (item) => {
+    const explicitType = String(item?.type || '').toLowerCase();
+    if (explicitType) return explicitType;
+    return searchCategory === 'tracks'
+      ? 'track'
+      : searchCategory === 'artists'
+        ? 'artist'
+        : searchCategory === 'albums'
+          ? 'album'
+          : searchCategory === 'videos'
+            ? 'video'
+            : searchCategory === 'playlists'
+              ? 'playlist'
+              : 'track';
+  };
+
   const handleSearchResultAction = async (item) => {
     if (!item) return;
-    if (searchCategory === 'tracks') {
+    const itemType = getSearchItemType(item);
+
+    if (itemType === 'track') {
       handlePlayTrack(item, { source: 'search', action: 'manual_select' });
       return;
     }
 
-    if (searchCategory === 'artists') {
-      const artistQuery = item.name || item.title || getArtistName(item);
-      if (artistQuery) {
-        setSearchCategory('tracks');
-        await handleSearch(artistQuery);
-      }
+    if (itemType === 'artist') {
+      await openArtistProfile(item);
       return;
     }
 
-    if (searchCategory === 'albums') {
+    if (itemType === 'album') {
       const albumQuery = item.title || item.name;
       if (albumQuery) {
         setSearchCategory('tracks');
@@ -743,12 +933,12 @@ const App = () => {
       return;
     }
 
-    if (searchCategory === 'videos') {
+    if (itemType === 'video') {
       handleOpenVideo(item);
       return;
     }
 
-    if (searchCategory === 'playlists') {
+    if (itemType === 'playlist') {
       const playlistQuery = item.title || item.name;
       if (playlistQuery) {
         setSearchCategory('tracks');
@@ -1019,6 +1209,12 @@ const App = () => {
       {/* Contenido principal */}
       <div ref={contentRef} className="flex-1 overflow-y-auto pb-32 md:pb-24 lg:pl-64">
         <div className="p-4 md:p-6">
+          {error && (
+            <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              {error}
+            </div>
+          )}
+
           {activeTab === 'home' && (
             <div className="space-y-8">
               {trendingTracks.length > 0 ? (
@@ -1033,6 +1229,7 @@ const App = () => {
                         key={track.id}
                         track={track}
                         onPlay={handlePlayTrack}
+                        onSelectArtist={handleArtistSelection}
                         onToggleFavorite={handleToggleFavorite}
                         onDownload={handleDownloadTrack}
                         isFavorite={favorites.some(f => f.id === track.id)}
@@ -1072,6 +1269,7 @@ const App = () => {
                           key={track.id || track.trackId}
                           track={track}
                           onPlay={handlePlayTrack}
+                          onSelectArtist={handleArtistSelection}
                           onToggleFavorite={handleToggleFavorite}
                           onDownload={handleDownloadTrack}
                           isFavorite={favorites.some(f => f.id === track.id)}
@@ -1129,6 +1327,7 @@ const App = () => {
                     <TrackCard
                       track={searchTopHit}
                       onPlay={handleSearchResultAction}
+                      onSelectArtist={handleArtistSelection}
                       onToggleFavorite={searchCategory === 'tracks' ? handleToggleFavorite : null}
                       onDownload={searchCategory === 'tracks' ? handleDownloadTrack : null}
                       isFavorite={favorites.some(f => f.id === searchTopHit.id)}
@@ -1145,6 +1344,7 @@ const App = () => {
                   <TrackList
                     tracks={searchResults}
                     onPlay={handlePlayTrack}
+                    onSelectArtist={handleArtistSelection}
                     onToggleFavorite={handleToggleFavorite}
                     onDownload={handleDownloadTrack}
                     favorites={favorites}
@@ -1157,6 +1357,7 @@ const App = () => {
                         key={item.id || item.uuid || item.trackId || index}
                         track={item}
                         onPlay={handleSearchResultAction}
+                        onSelectArtist={handleArtistSelection}
                         onToggleFavorite={searchCategory === 'tracks' ? handleToggleFavorite : null}
                         onDownload={searchCategory === 'tracks' ? handleDownloadTrack : null}
                         isFavorite={favorites.some(f => f.id === item.id)}
@@ -1172,6 +1373,167 @@ const App = () => {
             </div>
           )}
 
+          {activeTab === 'artist' && (
+            <div className="space-y-8">
+              <button
+                onClick={() => setActiveTab('search')}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-gray-200 transition hover:bg-white/10"
+              >
+                <ArrowLeft size={16} />
+                Volver a resultados
+              </button>
+
+              {artistViewLoading ? (
+                <div className="flex justify-center py-16">
+                  <Loader className="animate-spin text-[#1db954]" size={42} />
+                </div>
+              ) : artistView ? (
+                <>
+                  <section className="relative overflow-hidden rounded-[28px] border border-white/10 bg-gradient-to-br from-emerald-500/20 via-cyan-500/10 to-transparent p-6 md:p-8">
+                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(16,185,129,0.22),transparent_40%)]" />
+                    <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center">
+                      <div className="w-40 overflow-hidden rounded-3xl border border-white/10 bg-black/30 shadow-2xl">
+                        {artistView.coverUrl ? (
+                          <img
+                            src={artistView.coverUrl}
+                            alt={artistView.artist?.name || 'Artista'}
+                            className="aspect-square w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex aspect-square items-center justify-center bg-black/40">
+                            <UserRound size={52} className="text-white/40" />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex-1">
+                        <p className="text-xs font-semibold uppercase tracking-[0.35em] text-emerald-300">
+                          Artista
+                        </p>
+                        <h2 className="mt-2 text-4xl font-black tracking-tight md:text-5xl">
+                          {artistView.artist?.name || 'Artista'}
+                        </h2>
+                        <p className="mt-3 max-w-2xl text-sm text-gray-300">
+                          {artistView.mixSubtitle || 'Albumes, canciones y videos del artista en un solo lugar.'}
+                        </p>
+
+                        <div className="mt-5 flex flex-wrap gap-3 text-sm text-gray-200">
+                          {artistView.artist?.popularity != null && (
+                            <span className="rounded-full bg-black/30 px-3 py-1">
+                              Popularidad {artistView.artist.popularity}
+                            </span>
+                          )}
+                          {artistView.albums?.length > 0 && (
+                            <span className="rounded-full bg-black/30 px-3 py-1">
+                              {artistView.albums.length} albumes
+                            </span>
+                          )}
+                          {artistView.tracks?.length > 0 && (
+                            <span className="rounded-full bg-black/30 px-3 py-1">
+                              {artistView.tracks.length} canciones
+                            </span>
+                          )}
+                          {artistView.videos?.length > 0 && (
+                            <span className="rounded-full bg-black/30 px-3 py-1">
+                              {artistView.videos.length} videos
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {artistView.topHit && (
+                    <section>
+                      <div className="mb-4 flex items-center gap-2">
+                        <Flame className="text-amber-400" size={22} />
+                        <h3 className="text-xl font-bold">Mejor resultado relacionado</h3>
+                      </div>
+                      <div className="max-w-sm">
+                        <TrackCard
+                          track={artistView.topHit}
+                          onPlay={handleSearchResultAction}
+                          onSelectArtist={handleArtistSelection}
+                          onToggleFavorite={String(artistView.topHit?.type || '').toLowerCase() === 'track' ? handleToggleFavorite : null}
+                          onDownload={String(artistView.topHit?.type || '').toLowerCase() === 'track' ? handleDownloadTrack : null}
+                          isFavorite={favorites.some(f => f.id === artistView.topHit?.id)}
+                        />
+                      </div>
+                    </section>
+                  )}
+
+                  <section>
+                    <div className="mb-4 flex items-center gap-2">
+                      <Flame className="text-[#1db954]" size={22} />
+                      <h3 className="text-2xl font-bold">{artistView.mixSubtitle || 'Tendencias'}</h3>
+                    </div>
+                    {artistView.tracks?.length > 0 ? (
+                      <TrackList
+                        tracks={artistView.tracks}
+                        onPlay={handlePlayTrack}
+                        onSelectArtist={handleArtistSelection}
+                        onToggleFavorite={handleToggleFavorite}
+                        onDownload={handleDownloadTrack}
+                        favorites={favorites}
+                        currentTrackId={currentTrack?.id}
+                      />
+                    ) : (
+                      <p className="text-gray-400">No encontramos canciones destacadas para este artista.</p>
+                    )}
+                  </section>
+
+                  <section>
+                    <div className="mb-4 flex items-center gap-2">
+                      <Library className="text-cyan-400" size={22} />
+                      <h3 className="text-2xl font-bold">Albumes</h3>
+                    </div>
+                    {artistView.albums?.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                        {artistView.albums.map((album, index) => (
+                          <TrackCard
+                            key={album.id || album.uuid || index}
+                            track={album}
+                            onPlay={handleSearchResultAction}
+                            onSelectArtist={handleArtistSelection}
+                            isFavorite={false}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-400">No encontramos albumes para este artista.</p>
+                    )}
+                  </section>
+
+                  <section>
+                    <div className="mb-4 flex items-center gap-2">
+                      <Clapperboard className="text-amber-400" size={22} />
+                      <h3 className="text-2xl font-bold">Videos</h3>
+                    </div>
+                    {artistView.videos?.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                        {artistView.videos.map((video, index) => (
+                          <TrackCard
+                            key={video.id || video.uuid || index}
+                            track={video}
+                            onPlay={handleSearchResultAction}
+                            onSelectArtist={handleArtistSelection}
+                            isFavorite={false}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-400">No encontramos videos para este artista.</p>
+                    )}
+                  </section>
+                </>
+              ) : (
+                <p className="py-12 text-center text-gray-400">
+                  {artistViewError || 'Selecciona un artista para ver su perfil.'}
+                </p>
+              )}
+            </div>
+          )}
+
           {activeTab === 'queue' && (
             <div>
               <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
@@ -1182,6 +1544,7 @@ const App = () => {
                 <TrackList
                   tracks={queue}
                   onPlay={handlePlayTrack}
+                  onSelectArtist={handleArtistSelection}
                   onToggleFavorite={handleToggleFavorite}
                   onDownload={handleDownloadTrack}
                   favorites={favorites}
@@ -1239,6 +1602,7 @@ const App = () => {
                     <TrackList
                       tracks={favorites.slice(0, 10)}
                       onPlay={handlePlayTrack}
+                      onSelectArtist={handleArtistSelection}
                       onToggleFavorite={handleToggleFavorite}
                       onDownload={handleDownloadTrack}
                       favorites={favorites}
@@ -1256,6 +1620,7 @@ const App = () => {
                   <TrackList
                     tracks={historyTracks.slice(0, 20)}
                     onPlay={handlePlayTrack}
+                    onSelectArtist={handleArtistSelection}
                     onToggleFavorite={handleToggleFavorite}
                     onDownload={handleDownloadTrack}
                     favorites={favorites}

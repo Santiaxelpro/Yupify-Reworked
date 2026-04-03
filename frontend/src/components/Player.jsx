@@ -18,7 +18,7 @@ import api from '../services/api';
 
 const Player = ({
   currentTrack = null,
-  streamUrl = "",
+  streamUrl: _streamUrl = "",
   isPlaying = false,
   currentTime = 0,
   duration = 0,
@@ -39,8 +39,8 @@ const Player = ({
   onToggleRepeat = () => {},
   onToggleShuffle = () => {},
   audioRef = null,
-  onTimeUpdate = () => {},
-  onEnded = () => {},
+  onTimeUpdate: _onTimeUpdate = () => {},
+  onEnded: _onEnded = () => {},
 
   // 🔥 AGREGAR ESTO
   quality = "LOSSLESS",
@@ -60,7 +60,7 @@ const Player = ({
   const linesRef = React.useRef([]);
   const combinedLyricsCacheRef = React.useRef(new Map());
   const [activeLineIndex, setActiveLineIndex] = React.useState(-1);
-  const [activeSyllableIndex, setActiveSyllableIndex] = React.useState(-1);
+  const [, setActiveSyllableIndex] = React.useState(-1);
   const [smoothTime, setSmoothTime] = React.useState(0);
   const lyricsRafRef = React.useRef(null);
   const lastAudioTimeRef = React.useRef(0);

@@ -304,7 +304,7 @@ async function updateGDriveFile(fileId, content, contentType = 'application/json
   );
 }
 
-async function loadLyricsCacheFromGDrive(cacheKey, sources) {
+async function _loadLyricsCacheFromGDrive(cacheKey, sources) {
   if (!hasGDriveAuth()) {
     if (LYRICS_CACHE_DEBUG) {
       console.log('[lyrics-cache] GDrive auth missing, skipping read');
@@ -547,7 +547,7 @@ async function updateSongListEntry(entry) {
 
   await saveSongListToGDrive(next);
 }
-const FAST_SEARCH_POOL = 4;
+const _FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const TRACK_TIMEOUT_MS = 4500;
@@ -680,7 +680,7 @@ async function getRandomAPI() {
   return healthy[Math.floor(Math.random() * healthy.length)];
 }
 
-async function searchInAPI(apiBase, query, limit = 1) {
+async function _searchInAPI(apiBase, query, limit = 1) {
   if (!apiBase || !query) return null;
   const url = `${apiBase.replace(/\/+$/, '')}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`;
   const response = await axios.get(url, { timeout: 10000 });
@@ -822,10 +822,12 @@ function normalizeOfficialTidalSearchItem(item, bucket) {
     return {
       id: item.id,
       title: item.title || item.name || '',
+      version: item.version || null,
       artist: item.artists?.map(a => a.name).filter(Boolean).join(', ') || item.artist?.name || '',
       artists: Array.isArray(item.artists) ? item.artists.map(a => ({ id: a.id, name: a.name })) : [],
       cover: normalizeOfficialTidalImageCover(item.imageId || item.squareImage || item.album?.cover),
       duration: item.duration ?? null,
+      quality: item.videoQuality || item.quality || null,
       type: 'video'
     };
   }
@@ -848,19 +850,41 @@ function normalizeOfficialTidalSearchItem(item, bucket) {
     id: item.id,
     trackId: item.id,
     title: item.title || item.name || '',
+    version: item.version || null,
     artist: item.artists?.[0]?.name || item.artist?.name || '',
     artists: Array.isArray(item.artists) ? item.artists.map(a => ({ id: a.id, name: a.name })) : [],
+    cover: normalizeOfficialTidalImageCover(
+      item.imageCover
+      || item.imageId
+      || item.squareImage
+      || item.cover
+      || item.album?.cover
+    ),
     album: item.album
       ? {
           id: item.album.id,
           title: item.album.title || '',
-          cover: normalizeOfficialTidalImageCover(item.album.cover)
+          cover: normalizeOfficialTidalImageCover(
+            item.album.imageCover
+            || item.album.imageId
+            || item.album.squareImage
+            || item.album.cover
+          )
         }
       : undefined,
     duration: item.duration ?? null,
     explicit: Boolean(item.explicit),
     popularity: item.popularity ?? null,
     isrc: item.isrc || null,
+    audioQuality: item.audioQuality || item.quality || null,
+    quality: item.audioQuality || item.quality || null,
+    mediaMetadata: item.mediaMetadata || {
+      tags: [
+        item.audioQuality,
+        item.audioModes?.[0],
+        item.audioMode
+      ].filter(Boolean)
+    },
     type: 'track'
   };
 }
@@ -1120,11 +1144,14 @@ function shuffleArray(arr) {
 
 function sanitizeFilename(value) {
   if (!value) return 'track';
-  return value
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 180) || 'track';
+  const invalidChars = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*']);
+  const cleaned = Array.from(String(value))
+    .filter((char) => {
+      if (invalidChars.has(char)) return false;
+      return char.charCodeAt(0) >= 32;
+    })
+    .join('');
+  return cleaned.replace(/\s+/g, ' ').trim().slice(0, 180) || 'track';
 }
 
 function getArtistString(track) {
@@ -1165,7 +1192,9 @@ function inferAudioExtension(url, usedQuality) {
     const pathname = new URL(url).pathname;
     const ext = path.extname(pathname).replace('.', '').toLowerCase();
     if (ext) return ext;
-  } catch (e) {}
+  } catch (e) {
+    // Ignore malformed URLs and fall back to quality-based inference.
+  }
   if (usedQuality && usedQuality.includes('LOSSLESS')) return 'flac';
   return 'm4a';
 }
@@ -1597,9 +1626,9 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
         await saveAudioMetaToGDrive(fileName, metaPayload);
       }
 
-      try { fs.unlinkSync(tempPath); } catch {}
-      try { fs.unlinkSync(outputPath); } catch {}
-      try { if (coverPath) fs.unlinkSync(coverPath); } catch {}
+      try { fs.unlinkSync(tempPath); } catch { /* ignore cleanup error */ }
+      try { fs.unlinkSync(outputPath); } catch { /* ignore cleanup error */ }
+      try { if (coverPath) fs.unlinkSync(coverPath); } catch { /* ignore cleanup error */ }
       return true;
     }
 
@@ -1657,13 +1686,19 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
 
     try {
       fs.unlinkSync(tempPath);
-    } catch {}
+    } catch {
+      // Ignore cleanup errors for temporary files.
+    }
     try {
       if (uploadPath !== tempPath) fs.unlinkSync(uploadPath);
-    } catch {}
+    } catch {
+      // Ignore cleanup errors for temporary files.
+    }
     try {
       if (coverPath) fs.unlinkSync(coverPath);
-    } catch {}
+    } catch {
+      // Ignore cleanup errors for temporary files.
+    }
     return true;
   } catch (err) {
     console.warn('[audio-cache] failed:', err.message);
@@ -1767,7 +1802,7 @@ async function resolveTrackForDownload(id, qRaw) {
   };
 }
 
-async function fetchFirstSearchResult({ apis, searchQuery, limit, offset, timeoutMs = 4500 }) {
+async function _fetchFirstSearchResult({ apis, searchQuery, limit, offset, timeoutMs = 4500 }) {
   const requests = apis.map(api => (
     axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: timeoutMs })
       .then(r => {
@@ -1843,11 +1878,13 @@ async function fetchFirstVideoData({ apis, id, quality = 'HIGH', timeoutMs = 450
   const extractTrackPayload = (data) => {
     if (!data || typeof data !== 'object') return null;
     if (data.data && typeof data.data === 'object') return data.data;
+    if (data.video && typeof data.video === 'object') return data.video;
 
     if (
       data.manifest != null
       || data.url
       || data.manifestMimeType
+      || data.videoId != null
       || data.trackId != null
       || data.id != null
     ) {
@@ -1969,7 +2006,7 @@ async function ensureTrendingItems(targetCount) {
 
 
 // PROXY UNIVERSAL
-async function forward(req, res, endpoint) {
+async function _forward(req, res, endpoint) {
   try {
     const API = await getRandomAPI();
 
@@ -2702,18 +2739,18 @@ app.post('/api/download/:id', async (req, res) => {
       const stream = fs.createReadStream(outputPath);
       stream.pipe(res);
       stream.on('close', () => {
-        try { fs.unlinkSync(outputPath); } catch {}
-        try { fs.unlinkSync(inputPath); } catch {}
+        try { fs.unlinkSync(outputPath); } catch { /* ignore cleanup error */ }
+        try { fs.unlinkSync(inputPath); } catch { /* ignore cleanup error */ }
         if (coverPath) {
-          try { fs.unlinkSync(coverPath); } catch {}
+          try { fs.unlinkSync(coverPath); } catch { /* ignore cleanup error */ }
         }
       });
     } catch (err) {
       console.error('Error en descarga:', err.message);
-      try { fs.unlinkSync(outputPath); } catch {}
-      try { fs.unlinkSync(inputPath); } catch {}
+      try { fs.unlinkSync(outputPath); } catch { /* ignore cleanup error */ }
+      try { fs.unlinkSync(inputPath); } catch { /* ignore cleanup error */ }
       if (coverPath) {
-        try { fs.unlinkSync(coverPath); } catch {}
+        try { fs.unlinkSync(coverPath); } catch { /* ignore cleanup error */ }
       }
       return res.status(500).json({ error: 'Error generando descarga' });
     }
@@ -2731,7 +2768,7 @@ app.post('/api/download/:id', async (req, res) => {
 //  try {
 app.get('/api/search', async (req, res) => {
   try {
-  const { q, s, a, al, v, p, i, type = 'tracks', limit = 20, offset = 0 } = req.query;
+  const { q, s, a, al, v, p, i, limit = 20, offset = 0 } = req.query;
 
     // Construir parámetro de búsqueda (usa 's' como parámetro externo)
     let searchQuery = '';
@@ -4038,7 +4075,7 @@ app.get('/', (req, res) => {
 });
 
 // Manejo de errores
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error('Error:', err);
   res.status(500).json({ 
     error: 'Error interno del servidor',

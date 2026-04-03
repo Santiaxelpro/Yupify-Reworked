@@ -124,7 +124,6 @@ const initShakaPlayer = async (audioElement) => {
 
 export const useAudio = () => {
   const audioRef = useRef(null);
-  const rafRef = useRef(null);
   const onEndedRef = useRef(null);
   const fadeRafRef = useRef(null);
   const fadeActiveRef = useRef(false);
@@ -161,7 +160,6 @@ export const useAudio = () => {
   // 🔥 NUEVO: Calidad de audio global
   // ============================
   const [quality, setQuality] = useState(localStorage.getItem('audioQuality') || 'LOSSLESS');
-  const [isDashPlayback, setIsDashPlayback] = useState(false);
 
   // Usar refs para acceder al estado actual sin causar re-renders
   const isRepeatRef = useRef(isRepeat);
@@ -403,7 +401,6 @@ export const useAudio = () => {
 
       // Detectar si es DASH manifest (HI_RES)
       const isDash = trackData?.manifestMimeType === 'application/dash+xml';
-      setIsDashPlayback(isDash);
 
       if (presentation === 'PREVIEW') {
         console.warn('🚫 Track en PREVIEW, intentando fallback...');

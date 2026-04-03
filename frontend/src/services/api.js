@@ -4,10 +4,10 @@
 // En desarrollo por defecto apunta al backend local en http://localhost:3000
 // Puedes sobrescribir con VITE_API_URL en .env
 const DEFAULT_PROD_APIS = [
-  'https://api-two.yupify.qzz.io/',
-  'https://api-one.yupify.qzz.io/',
-  'https://yupify-reworked.vercel.app/',
-  'https://yupify-reworked.onrender.com/',
+  'https://api-two.yupify.qzz.io',
+  'https://api-one.yupify.qzz.io',
+  'https://yupify-reworked.vercel.app',
+  'https://yupify-reworked.onrender.com',
 ]
 
 const DEFAULT_PROD_API = DEFAULT_PROD_APIS[0];
