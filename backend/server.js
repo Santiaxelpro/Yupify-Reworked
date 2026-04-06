@@ -565,7 +565,9 @@ const TRENDING_COUNTRIES = [
 let trendingState = { ts: 0, seeds: [], seedCursor: 0, items: [], seenIds: new Set() };
 
 // Middleware
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 const isPagesDevOrigin = (origin) => {
   if (!origin) return false;
   try {
@@ -1107,6 +1109,110 @@ function hasStrongSearchMatch(items, rawQuery, kind) {
   return items.some(item => scoreSearchItem(item, queryInfo) >= 900);
 }
 
+function dedupeSearchItems(items) {
+  const uniqueItems = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const idKey = item?.id ?? item?.trackId ?? item?.uuid ?? JSON.stringify(item);
+    if (!seen.has(idKey)) {
+      seen.add(idKey);
+      uniqueItems.push(item);
+    }
+  }
+  return uniqueItems;
+}
+
+async function runLegacySearchQuery({ searchQuery, rawQuery, kind, limit, offset }) {
+  const envSearch = process.env.SEARCH_API && process.env.SEARCH_API.trim()
+    ? process.env.SEARCH_API.replace(/\/+$/, '')
+    : null;
+
+  if (envSearch) {
+    const url = `${envSearch}/search/?${searchQuery}&li=${limit}&offset=${offset}`;
+    const response = await axiosFast.get(url, { timeout: SEARCH_TIMEOUT_MS });
+    const remote = response.data || {};
+
+    let items = [];
+    let total = 0;
+    let resolvedOffset = Number(offset) || 0;
+    let resolvedLimit = Number(limit);
+
+    if (remote.data && Array.isArray(remote.data.items)) {
+      items = remote.data.items;
+      total = remote.data.totalNumberOfItems ?? remote.data.total ?? items.length;
+      resolvedOffset = Number(remote.data.offset ?? resolvedOffset) || 0;
+      resolvedLimit = Number(remote.data.limit ?? resolvedLimit);
+    } else if (Array.isArray(remote.items)) {
+      items = remote.items;
+      total = remote.total ?? remote.totalNumberOfItems ?? items.length;
+      resolvedOffset = Number(remote.offset ?? resolvedOffset) || 0;
+      resolvedLimit = Number(remote.limit ?? resolvedLimit);
+    }
+
+    const rankedItems = rankSearchItems(dedupeSearchItems(items), rawQuery, kind);
+    return {
+      version: remote.version || '2.4',
+      data: {
+        limit: Number.isFinite(resolvedLimit) ? resolvedLimit : Number(limit),
+        offset: resolvedOffset,
+        totalNumberOfItems: Number(total ?? rankedItems.length) || rankedItems.length,
+        items: rankedItems
+      }
+    };
+  }
+
+  const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+  const requests = allAPIs.map(api =>
+    axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
+      .then(r => ({ ok: true, data: r.data }))
+      .catch(() => ({ ok: false }))
+  );
+
+  const responses = await Promise.all(requests);
+  const combinedItems = responses
+    .filter(r => r.ok && r.data)
+    .flatMap(r => r.data?.data?.items ?? r.data?.items ?? []);
+
+  const rankedItems = rankSearchItems(dedupeSearchItems(combinedItems), rawQuery, kind);
+  return {
+    version: '2.4',
+    data: {
+      limit: Number(limit),
+      offset: Number(offset) || 0,
+      totalNumberOfItems: rankedItems.length,
+      items: rankedItems.slice(0, Number(limit))
+    }
+  };
+}
+
+async function buildLegacyGlobalSearchPayload(rawQuery, limit, offset) {
+  const sectionConfigs = [
+    { key: 'tracks', param: 's', kind: 'track' },
+    { key: 'artists', param: 'a', kind: 'artist' },
+    { key: 'albums', param: 'al', kind: 'album' },
+    { key: 'videos', param: 'v', kind: 'video' },
+    { key: 'playlists', param: 'p', kind: 'playlist' }
+  ];
+
+  const sectionResults = await Promise.all(sectionConfigs.map(async ({ key, param, kind }) => {
+    const queryParam = `${param}=${encodeURIComponent(rawQuery)}`;
+    try {
+      const payload = await runLegacySearchQuery({ searchQuery: queryParam, rawQuery, kind, limit, offset });
+      return [key, payload?.data || { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: 0, items: [] }];
+    } catch {
+      return [key, { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: 0, items: [] }];
+    }
+  }));
+
+  const sections = Object.fromEntries(sectionResults);
+  return {
+    version: '2.4',
+    topHit: null,
+    sections,
+    data: sections.tracks || { limit: Number(limit), offset: Number(offset) || 0, totalNumberOfItems: 0, items: [] }
+  };
+}
+
 async function fetchRecommendationsFromAPIs(params) {
   const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
   const requests = allAPIs.map(api =>
@@ -1125,6 +1231,55 @@ async function fetchRecommendationsFromAPIs(params) {
 
   const fallback = responses.find(r => r.ok && r.data);
   return fallback ? fallback.data : null;
+}
+
+function isAllowedVideoProxyUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      hostname.endsWith('.tidal.com')
+      || hostname === 'resources.tidal.com'
+      || hostname.endsWith('.video.tidal.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function buildVideoProxyUrl(req, rawUrl) {
+  if (!rawUrl || !isAllowedVideoProxyUrl(rawUrl)) return null;
+  return `${req.protocol}://${req.get('host')}/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
+}
+
+function absolutizeUrl(value, baseUrl) {
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
+}
+
+function rewriteM3u8Manifest(manifestText, baseUrl, req) {
+  return String(manifestText || '')
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      const keyMatch = line.match(/URI="([^"]+)"/i);
+      if (keyMatch) {
+        const absolute = absolutizeUrl(keyMatch[1], baseUrl);
+        const proxied = buildVideoProxyUrl(req, absolute);
+        return proxied ? line.replace(keyMatch[1], proxied) : line;
+      }
+
+      if (trimmed.startsWith('#')) return line;
+      const absolute = absolutizeUrl(trimmed, baseUrl);
+      const proxied = buildVideoProxyUrl(req, absolute);
+      return proxied || line;
+    })
+    .join('\n');
 }
 
 function normalizeSeedKey(title, artist) {
@@ -2605,7 +2760,9 @@ app.get('/api/video/:id', async (req, res) => {
     const payload = {
       ...respData,
       id: respData.id || respData.videoId || Number(id),
-      url: playbackUrl,
+      url: buildVideoProxyUrl(req, playbackUrl) || playbackUrl,
+      directUrl: playbackUrl,
+      coverUrl: buildVideoProxyUrl(req, buildCoverUrlFromTrack(respData, 1280)) || buildCoverUrlFromTrack(respData, 1280),
       requestedQuality
     };
     setCache(cacheKey, payload, CACHE_TTL.track);
@@ -2613,6 +2770,73 @@ app.get('/api/video/:id', async (req, res) => {
   } catch (error) {
     console.error('Error en /api/video:', error.message);
     return res.status(500).json({ error: 'Error interno al obtener video' });
+  }
+});
+
+app.get('/api/video/proxy', async (req, res) => {
+  try {
+    const targetUrl = (req.query.url || '').toString().trim();
+    if (!targetUrl || !isAllowedVideoProxyUrl(targetUrl)) {
+      return res.status(400).json({ error: 'URL de video no permitida' });
+    }
+
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+
+    const upstream = await axios({
+      method: 'GET',
+      url: targetUrl,
+      responseType: 'stream',
+      timeout: 0,
+      validateStatus: () => true,
+      headers: {
+        ...(req.headers.range ? { Range: req.headers.range } : {}),
+        'User-Agent': req.get('user-agent') || 'Yupify/1.0'
+      }
+    });
+
+    const contentType = String(upstream.headers['content-type'] || '').toLowerCase();
+    res.status(upstream.status);
+    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    res.setHeader('Cache-Control', 'no-store');
+
+    if (upstream.status >= 400) {
+      upstream.data.pipe(res);
+      return;
+    }
+
+    if (contentType.includes('mpegurl') || targetUrl.toLowerCase().includes('.m3u8')) {
+      let manifestText = '';
+      upstream.data.setEncoding('utf8');
+      upstream.data.on('data', chunk => { manifestText += chunk; });
+      upstream.data.on('end', () => {
+        const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
+        res.end(rewritten);
+      });
+      upstream.data.on('error', () => {
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'Error al leer manifest de video' });
+        } else {
+          res.end();
+        }
+      });
+      return;
+    }
+
+    upstream.data.on('error', () => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Error al proxificar video' });
+      } else {
+        res.end();
+      }
+    });
+    upstream.data.pipe(res);
+  } catch (error) {
+    console.error('Error en /api/video/proxy:', error.message);
+    return res.status(500).json({ error: 'Error interno al proxificar video' });
   }
 });
 
@@ -2763,6 +2987,93 @@ app.post('/api/download/:id', async (req, res) => {
 
 
 // Obtener manifest DASH (Ya no usado, ahora /api/song/:id)
+
+app.get('/api/search', async (req, res) => {
+  try {
+    const { q, s, a, al, v, p, i, limit = 20, offset = 0 } = req.query;
+
+    let searchQuery = '';
+    if (q) searchQuery = `s=${encodeURIComponent(q)}`;
+    else if (s) searchQuery = `s=${encodeURIComponent(s)}`;
+    else if (a) searchQuery = `a=${encodeURIComponent(a)}`;
+    else if (al) searchQuery = `al=${encodeURIComponent(al)}`;
+    else if (v) searchQuery = `v=${encodeURIComponent(v)}`;
+    else if (p) searchQuery = `p=${encodeURIComponent(p)}`;
+    else if (i) searchQuery = `i=${encodeURIComponent(i)}`;
+
+    if (!searchQuery) {
+      return res.status(400).json({ error: 'Falta parámetro de búsqueda (q/s/a/al/v/p/i)' });
+    }
+
+    const rawQuery = q || s || a || al || v || p || i || '';
+    const searchKind = (q || s)
+      ? 'track'
+      : (a ? 'artist' : (al ? 'album' : (v ? 'video' : (p ? 'playlist' : 'track'))));
+    const officialSearchConfig = hasOfficialTidalSearchConfig()
+      ? getOfficialTidalSearchConfig({ q, s, a, al, v, p, i })
+      : null;
+    const searchMode = officialSearchConfig
+      ? (officialSearchConfig.global ? 'tidal-official-global-v2' : `tidal-official-${officialSearchConfig.bucket}-v2`)
+      : ((q || s) ? 'legacy-global-v2' : 'legacy-v2');
+
+    const cacheKey = `search:${searchMode}:${searchQuery}|li:${limit}|offset:${offset}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      if (!(officialSearchConfig?.global && (!cached.sections || typeof cached.sections !== 'object'))) {
+        const rankedCached = applySearchRanking(cached, rawQuery, searchKind);
+        if (hasStrongSearchMatch(rankedCached?.data?.items, rawQuery, searchKind)) {
+          return res.json(rankedCached);
+        }
+      }
+    }
+
+    const gdriveCached = await loadSearchCacheFromGDrive(cacheKey);
+    if (gdriveCached) {
+      if (!(officialSearchConfig?.global && (!gdriveCached.sections || typeof gdriveCached.sections !== 'object'))) {
+        const rankedGdrive = applySearchRanking(gdriveCached, rawQuery, searchKind);
+        if (hasStrongSearchMatch(rankedGdrive?.data?.items, rawQuery, searchKind)) {
+          setCache(cacheKey, rankedGdrive, CACHE_TTL.search);
+          return res.json(rankedGdrive);
+        }
+      }
+    }
+
+    if (ONLY_GOOGLE_DRIVE) {
+      return res.status(404).json({
+        error: 'ONLY_GOOGLE_DRIVE enabled: search cache miss',
+        cacheKey
+      });
+    }
+
+    if (officialSearchConfig) {
+      try {
+        const officialPayload = await searchOfficialTidal({ q, s, a, al, v, p, i, limit, offset });
+        const rankedOfficial = applySearchRanking(officialPayload, rawQuery, searchKind);
+        setCache(cacheKey, rankedOfficial, CACHE_TTL.search);
+        saveSearchCacheToGDrive(cacheKey, rankedOfficial);
+        return res.json(rankedOfficial);
+      } catch (err) {
+        console.warn('[search] official TIDAL search failed, using fallback:', err.message);
+      }
+    }
+
+    if (q || s) {
+      const globalLegacyPayload = await buildLegacyGlobalSearchPayload(rawQuery, limit, offset);
+      setCache(cacheKey, globalLegacyPayload, CACHE_TTL.search);
+      saveSearchCacheToGDrive(cacheKey, globalLegacyPayload);
+      return res.json(globalLegacyPayload);
+    }
+
+    const payload = await runLegacySearchQuery({ searchQuery, rawQuery, kind: searchKind, limit, offset });
+    const rankedPayload = applySearchRanking(payload, rawQuery, searchKind);
+    setCache(cacheKey, rankedPayload, CACHE_TTL.search);
+    saveSearchCacheToGDrive(cacheKey, rankedPayload);
+    return res.json(rankedPayload);
+  } catch (error) {
+    console.error('Error en búsqueda (v2):', error?.message || error);
+    return res.status(500).json({ error: 'Error al buscar', details: error?.message || String(error) });
+  }
+});
 
 //app.get('/api/dash/:id', async (req, res) => {
 //  try {

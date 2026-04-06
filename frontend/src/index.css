@@ -121,3 +121,47 @@ input[type="range"]::-moz-range-track {
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
+
+.yupify-video-modal {
+  --plyr-color-main: #34d399;
+  --plyr-video-control-color: #f8fafc;
+  --plyr-video-control-color-hover: #ffffff;
+  --plyr-video-control-background-hover: rgba(52, 211, 153, 0.24);
+  --plyr-range-fill-background: linear-gradient(90deg, #34d399 0%, #22d3ee 100%);
+  --plyr-tooltip-background: rgba(10, 10, 10, 0.92);
+  --plyr-tooltip-color: #f8fafc;
+  --plyr-menu-background: rgba(15, 23, 42, 0.94);
+  --plyr-menu-color: #e5e7eb;
+  --plyr-control-spacing: 12px;
+  --plyr-control-radius: 999px;
+  --plyr-font-family: 'Segoe UI', 'Inter', sans-serif;
+}
+
+.yupify-video-modal .plyr {
+  width: 100%;
+  height: 100%;
+}
+
+.yupify-video-modal .plyr--video {
+  background: #000;
+}
+
+.yupify-video-modal .plyr__control--overlaid {
+  box-shadow: 0 12px 40px rgba(16, 185, 129, 0.28);
+}
+
+.yupify-video-modal .plyr__controls {
+  background:
+    linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.28) 20%, rgba(0, 0, 0, 0.88) 100%);
+  padding: 18px !important;
+}
+
+.yupify-video-modal .plyr__progress input[type='range'],
+.yupify-video-modal .plyr__volume input[type='range'] {
+  color: #34d399;
+}
+
+.yupify-video-modal .plyr__menu__container {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(14px);
+}
