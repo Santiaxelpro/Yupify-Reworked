@@ -577,10 +577,23 @@ const isPagesDevOrigin = (origin) => {
     return false;
   }
 };
+const isLocalhostOrigin = (origin) => {
+  if (!origin) return false;
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1';
+  } catch {
+    return false;
+  }
+};
+const ALLOW_LOCALHOST_ORIGIN = process.env.ALLOW_LOCALHOST === 'true'
+  || process.env.NODE_ENV !== 'production';
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
       'http://localhost:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
       'https://yupify-reworked.vercel.app',
       'https://yupify.qzz.io',
       'https://yupify.pages.dev',
@@ -592,7 +605,13 @@ app.use(cors({
     ];
     
     // Permitir si está en la lista, si no tiene origin (server-to-server), o si es wildcard
-    if (!origin || allowedOrigins.includes(origin) || isPagesDevOrigin(origin) || process.env.CORS_ORIGIN === '*' || process.env.CORS_ORIGIN === origin) {
+    if (!origin
+      || allowedOrigins.includes(origin)
+      || isPagesDevOrigin(origin)
+      || (ALLOW_LOCALHOST_ORIGIN && isLocalhostOrigin(origin))
+      || process.env.CORS_ORIGIN === '*'
+      || process.env.CORS_ORIGIN === origin
+    ) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -845,13 +864,15 @@ function normalizeOfficialTidalSearchItem(item, bucket) {
   }
 
   if (bucket === 'videos') {
+    const cover = normalizeOfficialTidalImageCover(item.imageId || item.squareImage || item.album?.cover);
     return {
       id: item.id,
       title: item.title || item.name || '',
       version: item.version || null,
       artist: item.artists?.map(a => a.name).filter(Boolean).join(', ') || item.artist?.name || '',
       artists: Array.isArray(item.artists) ? item.artists.map(a => ({ id: a.id, name: a.name })) : [],
-      cover: normalizeOfficialTidalImageCover(item.imageId || item.squareImage || item.album?.cover),
+      cover,
+      coverUrl: buildCoverUrlFromTrack({ cover }, 1280, 720),
       duration: item.duration ?? null,
       quality: item.videoQuality || item.quality || null,
       type: 'video'
@@ -1317,55 +1338,6 @@ async function fetchRecommendationsFromAPIs(params) {
   return fallback ? fallback.data : null;
 }
 
-function isAllowedVideoProxyUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    const hostname = parsed.hostname.toLowerCase();
-    return (
-      hostname.endsWith('.tidal.com')
-      || hostname === 'resources.tidal.com'
-      || hostname.endsWith('.video.tidal.com')
-    );
-  } catch {
-    return false;
-  }
-}
-
-function buildVideoProxyUrl(req, rawUrl) {
-  if (!rawUrl || !isAllowedVideoProxyUrl(rawUrl)) return null;
-  return `${req.protocol}://${req.get('host')}/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
-}
-
-function absolutizeUrl(value, baseUrl) {
-  try {
-    return new URL(value, baseUrl).toString();
-  } catch {
-    return value;
-  }
-}
-
-function rewriteM3u8Manifest(manifestText, baseUrl, req) {
-  return String(manifestText || '')
-    .split('\n')
-    .map((line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return line;
-
-      const keyMatch = line.match(/URI="([^"]+)"/i);
-      if (keyMatch) {
-        const absolute = absolutizeUrl(keyMatch[1], baseUrl);
-        const proxied = buildVideoProxyUrl(req, absolute);
-        return proxied ? line.replace(keyMatch[1], proxied) : line;
-      }
-
-      if (trimmed.startsWith('#')) return line;
-      const absolute = absolutizeUrl(trimmed, baseUrl);
-      const proxied = buildVideoProxyUrl(req, absolute);
-      return proxied || line;
-    })
-    .join('\n');
-}
-
 function normalizeSeedKey(title, artist) {
   const t = (title || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
   const a = (artist || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -1403,8 +1375,12 @@ function getArtistString(track) {
   return '';
 }
 
-function buildCoverUrlFromTrack(track, size = 1280) {
+function buildCoverUrlFromTrack(track, size = 1280, height = null) {
   if (!track) return null;
+  const parsedWidth = Number(size);
+  const width = Number.isFinite(parsedWidth) && parsedWidth > 0 ? parsedWidth : 1280;
+  const parsedHeight = height == null ? NaN : Number(height);
+  const safeHeight = Number.isFinite(parsedHeight) && parsedHeight > 0 ? parsedHeight : width;
   const rawCover = track.cover || track.album?.cover;
   if (!rawCover) return null;
   if (typeof rawCover === 'string' && rawCover.startsWith('http')) {
@@ -1423,7 +1399,7 @@ function buildCoverUrlFromTrack(track, size = 1280) {
     coverId = trimmed.replace(/-/g, '/');
   }
   if (!coverId) return null;
-  return `https://resources.tidal.com/images/${coverId}/${size}x${size}.jpg`;
+  return `https://resources.tidal.com/images/${coverId}/${width}x${safeHeight}.jpg`;
 }
 
 function inferAudioExtension(url, usedQuality) {
@@ -2844,9 +2820,9 @@ app.get('/api/video/:id', async (req, res) => {
     const payload = {
       ...respData,
       id: respData.id || respData.videoId || Number(id),
-      url: buildVideoProxyUrl(req, playbackUrl) || playbackUrl,
+      url: playbackUrl,
       directUrl: playbackUrl,
-      coverUrl: buildVideoProxyUrl(req, buildCoverUrlFromTrack(respData, 1280)) || buildCoverUrlFromTrack(respData, 1280),
+      coverUrl: buildCoverUrlFromTrack(respData, 1280, 720),
       requestedQuality
     };
     setCache(cacheKey, payload, CACHE_TTL.track);
@@ -2854,87 +2830,6 @@ app.get('/api/video/:id', async (req, res) => {
   } catch (error) {
     console.error('Error en /api/video:', error.message);
     return res.status(500).json({ error: 'Error interno al obtener video' });
-  }
-});
-
-app.get('/api/video/proxy', async (req, res) => {
-  try {
-    const targetUrl = (req.query.url || '').toString().trim();
-    if (!targetUrl || !isAllowedVideoProxyUrl(targetUrl)) {
-      return res.status(400).json({ error: 'URL de video no permitida' });
-    }
-    const expectsManifest = targetUrl.toLowerCase().includes('.m3u8');
-
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
-
-    const upstream = await axios({
-      method: 'GET',
-      url: targetUrl,
-      responseType: expectsManifest ? 'text' : 'stream',
-      timeout: 0,
-      validateStatus: () => true,
-      decompress: false,
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      headers: {
-        ...(req.headers.range ? { Range: req.headers.range } : {}),
-        'User-Agent': req.get('user-agent') || 'Yupify/1.0',
-        'Accept-Encoding': 'identity',
-        'Accept': expectsManifest
-          ? 'application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*'
-          : '*/*'
-      }
-    });
-
-    const contentType = String(upstream.headers['content-type'] || '').toLowerCase();
-    res.status(upstream.status);
-    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
-    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
-    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
-    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
-    res.setHeader('Cache-Control', 'no-store');
-
-    if (upstream.status >= 400) {
-      if (typeof upstream.data === 'string' || Buffer.isBuffer(upstream.data)) {
-        res.end(upstream.data);
-      } else {
-        upstream.data.pipe(res);
-      }
-      return;
-    }
-
-    if (contentType.includes('mpegurl') || expectsManifest) {
-      const manifestText = typeof upstream.data === 'string'
-        ? upstream.data
-        : Buffer.isBuffer(upstream.data)
-          ? upstream.data.toString('utf8')
-          : '';
-      const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-      res.end(rewritten);
-      return;
-    }
-
-    upstream.data.on('error', () => {
-      if (!res.headersSent) {
-        res.status(502).json({ error: 'Error al proxificar video' });
-      } else {
-        res.end();
-      }
-    });
-    upstream.data.pipe(res);
-  } catch (error) {
-    const upstreamStatus = error?.response?.status || null;
-    const upstreamData = typeof error?.response?.data === 'string'
-      ? error.response.data.slice(0, 300)
-      : null;
-    console.error('Error en /api/video/proxy:', error.message, 'status:', upstreamStatus, 'url:', req.query.url || '', 'body:', upstreamData);
-    return res.status(502).json({
-      error: 'Error al proxificar video',
-      details: error?.message || 'Unknown proxy error',
-      upstreamStatus
-    });
   }
 });
 

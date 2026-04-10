@@ -7,7 +7,6 @@ import {
   Volume2,
   VolumeX,
   Heart,
-  Share2,
   Repeat,
   Shuffle,
   FileText,
@@ -15,6 +14,8 @@ import {
 } from "lucide-react";
 import { getArtistName, getTrackDisplayTitle, getCoverUrl, getTrackQualityValue, formatQualityLabel } from '../utils/helpers';
 import api from '../services/api';
+
+const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 const Player = ({
   currentTrack = null,
@@ -48,6 +49,23 @@ const Player = ({
   preloadedLyrics = null
 }) => {
   const accent = '#1db954';
+  const getStoredPlaybackRate = () => {
+    if (typeof window === 'undefined') return 1;
+    const raw = window.localStorage.getItem('playbackRate');
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+  };
+  const [playbackRate, setPlaybackRate] = useState(getStoredPlaybackRate);
+  const playbackRateLabel = Number.isFinite(playbackRate)
+    ? String(playbackRate).replace(/\.0$/, '')
+    : '1';
+  const cyclePlaybackRate = React.useCallback(() => {
+    setPlaybackRate((prev) => {
+      const index = PLAYBACK_RATES.indexOf(prev);
+      const next = PLAYBACK_RATES[(index + 1) % PLAYBACK_RATES.length];
+      return Number.isFinite(next) ? next : 1;
+    });
+  }, []);
   // ----------------------
   // 🔥 LYRICS MODAL
   // ----------------------
@@ -656,10 +674,25 @@ const Player = ({
     return `${m}:${String(ss).padStart(2, "0")}`;
   };
 
+  React.useEffect(() => {
+    if (!Number.isFinite(playbackRate)) return;
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('playbackRate', String(playbackRate));
+      }
+    } catch {}
+    const audio = audioRef?.current || document.getElementById('yupify-audio-player');
+    if (audio && Math.abs((audio.playbackRate || 1) - playbackRate) > 0.001) {
+      audio.playbackRate = playbackRate;
+    }
+  }, [playbackRate, audioRef]);
+
   if (!currentTrack) return null;
 
   const tidalCover = getCoverUrl(currentTrack, 640);
   const displayTitle = getTrackDisplayTitle(currentTrack);
+  const titleText = displayTitle || currentTrack.title || 'Reproduciendo';
+  const artistText = getArtistName(currentTrack);
   const availableSourceLabels = lyricsSources
     .filter((source) => source.id !== 'auto' && availableSources[source.id])
     .map((source) => source.label);
@@ -989,6 +1022,215 @@ const Player = ({
             right: 14px;
           }
         }
+
+        .yupify-player-pro {
+          position: relative;
+          overflow: hidden;
+          border-top: 1px solid rgba(255,255,255,0.08);
+          background: #080808;
+          box-shadow: 0 -28px 80px rgba(0,0,0,0.6);
+          font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+        }
+        .yupify-player-pro .player-backdrop {
+          position: absolute;
+          inset: 0;
+          background-size: cover;
+          background-position: center;
+          filter: blur(36px) saturate(1.15);
+          opacity: 0.28;
+          transform: scale(1.12);
+        }
+        .yupify-player-pro .player-scrim {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(180deg, rgba(8,8,8,0.82), rgba(8,8,8,0.98));
+        }
+        .yupify-player-pro .player-content {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          padding: 14px 18px 16px;
+        }
+        .yupify-player-pro .player-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+          flex-wrap: wrap;
+        }
+        .yupify-player-pro .player-info {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          min-width: 0;
+          flex: 1;
+        }
+        .yupify-player-pro .player-cover {
+          width: 64px;
+          height: 64px;
+          border-radius: 16px;
+          object-fit: cover;
+          box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+          border: 1px solid rgba(255,255,255,0.1);
+        }
+        .yupify-player-pro .player-meta {
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+        .yupify-player-pro .player-title-row {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .yupify-player-pro .player-title {
+          font-size: 16px;
+          font-weight: 600;
+          color: #f8fafc;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 48vw;
+        }
+        .yupify-player-pro .player-artist {
+          font-size: 13px;
+          color: rgba(226,232,240,0.72);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 48vw;
+        }
+        .yupify-player-pro .player-badges {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .yupify-player-pro .player-badge {
+          font-size: 11px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          background: rgba(16,185,129,0.15);
+          color: #34d399;
+          border: 1px solid rgba(16,185,129,0.35);
+        }
+        .yupify-player-pro .player-chip {
+          font-size: 11px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.08);
+          color: #e2e8f0;
+          border: 1px solid rgba(255,255,255,0.12);
+          transition: all 0.2s ease;
+        }
+        .yupify-player-pro .player-chip:hover {
+          background: rgba(255,255,255,0.16);
+        }
+        .yupify-player-pro .player-actions {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .yupify-player-pro .player-progress {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 12px;
+          color: rgba(226,232,240,0.6);
+        }
+        .yupify-player-pro .player-controls {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          flex-wrap: wrap;
+        }
+        .yupify-player-pro .player-transport {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 16px;
+          flex: 1;
+        }
+        .yupify-player-pro .player-volume {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .yupify-player-pro .player-quality {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .yupify-player-pro .player-quality label {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.18em;
+          color: rgba(226,232,240,0.55);
+        }
+        .yupify-player-pro .player-quality select {
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.18);
+          color: #e2e8f0;
+          padding: 6px 12px;
+          border-radius: 999px;
+          font-size: 12px;
+          outline: none;
+        }
+        .yupify-player-pro .player-quality select:focus {
+          border-color: rgba(16,185,129,0.6);
+          box-shadow: 0 0 0 3px rgba(16,185,129,0.2);
+        }
+        .yupify-player-pro .player-eq {
+          display: flex;
+          align-items: flex-end;
+          gap: 3px;
+          height: 16px;
+        }
+        .yupify-player-pro .player-eq span {
+          width: 3px;
+          height: 6px;
+          border-radius: 999px;
+          background: rgba(52,211,153,0.4);
+          animation: playerBars 1.1s ease-in-out infinite;
+          animation-play-state: paused;
+        }
+        .yupify-player-pro .player-eq span:nth-child(2) {
+          animation-delay: 0.2s;
+        }
+        .yupify-player-pro .player-eq span:nth-child(3) {
+          animation-delay: 0.4s;
+        }
+        .yupify-player-pro .player-eq.is-playing span {
+          animation-play-state: running;
+        }
+        @keyframes playerBars {
+          0% { height: 6px; }
+          50% { height: 16px; }
+          100% { height: 6px; }
+        }
+        @media (max-width: 720px) {
+          .yupify-player-pro .player-cover {
+            width: 52px;
+            height: 52px;
+            border-radius: 14px;
+          }
+          .yupify-player-pro .player-title {
+            max-width: 60vw;
+          }
+          .yupify-player-pro .player-artist {
+            max-width: 60vw;
+          }
+          .yupify-player-pro .player-controls {
+            justify-content: center;
+          }
+          .yupify-player-pro .player-transport {
+            width: 100%;
+          }
+        }
       `}</style>
       {/* 🎤 Modal de Letras */}
       {lyricsOpen && (
@@ -1126,127 +1368,144 @@ const Player = ({
         </div>
       )}
 
-    {/* Selector de calidad */}
-<div className="mt-3 px-4">
-  <label className="text-gray-400 text-xs font-semibold px-1">
-    Calidad de audio
-  </label>
-  <select
-    className="mt-1 w-full bg-gray-900 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 outline-none focus:border-green-500 transition"
-    value={quality}
-    onChange={(e) => {
-      const q = e.target.value;
-      onChangeQuality(q);
-    }}
-  >
-    <option value="HI_RES_LOSSLESS">HI-RES</option>
-    <option value="LOSSLESS">LOSSLESS (FLAC)</option>
-    <option value="HIGH">HIGH (320kbps)</option>
-    <option value="LOW">LOW (96kbps)</option>
-  </select>
-</div>
       {/* 🎧 PLAYER */}
-      <div className="fixed bottom-16 md:bottom-0 left-0 right-0 bg-gray-950 border-t border-gray-800 shadow-2xl lg:pl-64">
-
-        {/* Info */}
-        <div className="flex items-center gap-3 px-3 sm:px-4 pt-3 flex-wrap">
-          <img
-            src={tidalCover}
-            alt={displayTitle || currentTrack.title}
-            className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg shadow-lg"
+      <div className="fixed bottom-16 md:bottom-0 left-0 right-0 lg:pl-64">
+        <div className="yupify-player-pro">
+          <div
+            className="player-backdrop"
+            style={tidalCover ? { backgroundImage: `url(${tidalCover})` } : undefined}
           />
+          <div className="player-scrim" />
 
-          <div className="flex-1 min-w-0">
-            <h3 className="font-semibold truncate">{displayTitle}</h3>
-            <p className="text-sm text-gray-400 truncate">
-              {getArtistName(currentTrack)}
-            </p>
-            <span className="text-xs" style={{ color: accent }}>{playbackQuality}</span>
-          </div>
+          <div className="player-content">
+            <div className="player-top">
+              <div className="player-info">
+                <img
+                  src={tidalCover}
+                  alt={titleText}
+                  className="player-cover"
+                />
+                <div className="player-meta">
+                  <div className="player-title-row">
+                    <h3 className="player-title">{titleText}</h3>
+                    <div className={`player-eq ${isPlaying ? 'is-playing' : ''}`}>
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </div>
+                  <p className="player-artist">{artistText}</p>
+                  <div className="player-badges">
+                    <span className="player-badge">{playbackQuality}</span>
+                    <button
+                      type="button"
+                      onClick={cyclePlaybackRate}
+                      className="player-chip"
+                      title="Cambiar velocidad de reproducción"
+                    >
+                      {playbackRateLabel}x
+                    </button>
+                  </div>
+                </div>
+              </div>
 
-          <div className="flex items-center gap-2 sm:gap-3 ml-auto w-full sm:w-auto justify-end">
-            <button onClick={onToggleFavorite}>
-              <Heart
-                className={
-                  isFavorite
-                    ? "fill-red-500 text-red-500 w-5 h-5 sm:w-6 sm:h-6"
-                    : "text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6"
-                }
+              <div className="player-actions">
+                <button onClick={onToggleFavorite}>
+                  <Heart
+                    className={
+                      isFavorite
+                        ? "fill-red-500 text-red-500 w-5 h-5 sm:w-6 sm:h-6"
+                        : "text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6"
+                    }
+                  />
+                </button>
+
+                <button onClick={() => onDownload(currentTrack)}>
+                  <Download className="text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6" />
+                </button>
+
+                <button onClick={openLyrics}>
+                  <FileText className="text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6" />
+                </button>
+              </div>
+            </div>
+
+            <div className="player-progress">
+              <span>{formatTime(currentTime)}</span>
+
+              <input
+                type="range"
+                min="0"
+                max={100}
+                value={duration ? (currentTime / duration) * 100 : 0}
+                onChange={(e) => onSeek(Number(e.target.value))}
+                className="flex-1 yupify-range"
+                style={{
+                  background: `linear-gradient(90deg, ${accent} ${duration ? (currentTime / duration) * 100 : 0}%, rgba(255,255,255,0.06) ${duration ? (currentTime / duration) * 100 : 0}%)`
+                }}
               />
-            </button>
 
-            <button onClick={() => onDownload(currentTrack)}>
-              <Download className="text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6" />
-            </button>
+              <span>{formatTime(duration)}</span>
+            </div>
 
-            <button onClick={openLyrics}>
-              <FileText className="text-gray-400 hover:text-white w-5 h-5 sm:w-6 sm:h-6" />
-            </button>
-          </div>
-        </div>
+            <div className="player-controls">
+              <div className="player-transport">
+                <button onClick={onToggleShuffle}>
+                  <Shuffle className={isShuffle ? "text-green-500 w-5 h-5 sm:w-6 sm:h-6" : "text-gray-400 w-5 h-5 sm:w-6 sm:h-6"} />
+                </button>
 
-        {/* Barra progreso */}
-        <div className="px-4 py-2">
-          <div className="flex items-center gap-2 text-xs text-gray-400">
-            <span>{formatTime(currentTime)}</span>
+                <button onClick={onSkipPrevious}>
+                  <SkipBack className="text-gray-400 w-7 h-7 sm:w-8 sm:h-8" />
+                </button>
 
-            <input
-              type="range"
-              min="0"
-              max={100}
-              value={duration ? (currentTime / duration) * 100 : 0}
-              onChange={(e) => onSeek(Number(e.target.value))}
-              className="flex-1 yupify-range"
-              style={{
-                background: `linear-gradient(90deg, ${accent} ${duration ? (currentTime / duration) * 100 : 0}%, rgba(255,255,255,0.06) ${duration ? (currentTime / duration) * 100 : 0}%)`
-              }}
-            />
+                <button
+                  onClick={onTogglePlay}
+                  className="rounded-full p-3 sm:p-4 hover:opacity-90"
+                  style={{ backgroundColor: accent }}
+                >
+                  {isPlaying ? <Pause className="w-6 h-6 sm:w-7 sm:h-7" /> : <Play className="w-6 h-6 sm:w-7 sm:h-7" />}
+                </button>
 
-            <span>{formatTime(duration)}</span>
-          </div>
-        </div>
+                <button onClick={onSkipNext}>
+                  <SkipForward className="text-gray-400 w-7 h-7 sm:w-8 sm:h-8" />
+                </button>
 
-        {/* Controles */}
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 px-3 sm:px-4 pb-4">
-          <div className="flex items-center justify-center gap-3 sm:gap-4 w-full sm:w-auto">
-            <button onClick={onToggleShuffle}>
-              <Shuffle className={isShuffle ? "text-green-500 w-5 h-5 sm:w-6 sm:h-6" : "text-gray-400 w-5 h-5 sm:w-6 sm:h-6"} />
-            </button>
+                <button onClick={onToggleRepeat}>
+                  <Repeat className={isRepeat ? "text-green-500 w-5 h-5 sm:w-6 sm:h-6" : "text-gray-400 w-5 h-5 sm:w-6 sm:h-6"} />
+                </button>
+              </div>
 
-            <button onClick={onSkipPrevious}>
-              <SkipBack className="text-gray-400 w-7 h-7 sm:w-8 sm:h-8" />
-            </button>
+              <div className="player-volume">
+                <button onClick={onToggleMute}>
+                  {isMuted ? <VolumeX className="w-5 h-5 sm:w-6 sm:h-6" /> : <Volume2 className="w-5 h-5 sm:w-6 sm:h-6" />}
+                </button>
 
-            <button
-              onClick={onTogglePlay}
-              className="rounded-full p-3 sm:p-4 hover:opacity-90"
-              style={{ backgroundColor: accent }}
-            >
-              {isPlaying ? <Pause className="w-6 h-6 sm:w-7 sm:h-7" /> : <Play className="w-6 h-6 sm:w-7 sm:h-7" />}
-            </button>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={isMuted ? 0 : volume * 100}
+                  onChange={(e) => onVolumeChange(Number(e.target.value))}
+                  className="yupify-range w-24 sm:w-32"
+                />
+              </div>
 
-            <button onClick={onSkipNext}>
-              <SkipForward className="text-gray-400 w-7 h-7 sm:w-8 sm:h-8" />
-            </button>
-
-            <button onClick={onToggleRepeat}>
-              <Repeat className={isRepeat ? "text-green-500 w-5 h-5 sm:w-6 sm:h-6" : "text-gray-400 w-5 h-5 sm:w-6 sm:h-6"} />
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2 sm:ml-4 w-full sm:w-auto justify-center sm:justify-start">
-            <button onClick={onToggleMute}>
-              {isMuted ? <VolumeX className="w-5 h-5 sm:w-6 sm:h-6" /> : <Volume2 className="w-5 h-5 sm:w-6 sm:h-6" />}
-            </button>
-
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={isMuted ? 0 : volume * 100}
-              onChange={(e) => onVolumeChange(Number(e.target.value))}
-              className="yupify-range w-24 sm:w-32"
-            />
+              <div className="player-quality">
+                <label>Calidad</label>
+                <select
+                  value={quality}
+                  onChange={(e) => {
+                    const q = e.target.value;
+                    onChangeQuality(q);
+                  }}
+                >
+                  <option value="HI_RES_LOSSLESS">HI-RES</option>
+                  <option value="LOSSLESS">LOSSLESS (FLAC)</option>
+                  <option value="HIGH">HIGH (320kbps)</option>
+                  <option value="LOW">LOW (96kbps)</option>
+                </select>
+              </div>
+            </div>
           </div>
         </div>
 
