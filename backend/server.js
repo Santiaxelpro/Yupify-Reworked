@@ -790,6 +790,30 @@ function normalizeOfficialTidalImageCover(imageId) {
   return normalized || null;
 }
 
+function matchesOfficialTidalBucket(item, bucket) {
+  if (!item || typeof item !== 'object') return false;
+
+  if (bucket === 'artists') {
+    return isNonEmpty(item.name) && !item.title && !item.album && !item.audioQuality && !item.videoQuality;
+  }
+
+  if (bucket === 'albums') {
+    return Boolean(item.title || item.name) && !item.audioQuality && !item.videoQuality
+      && (item.numberOfTracks != null || item.releaseDate || item.cover || item.imageCover);
+  }
+
+  if (bucket === 'videos') {
+    return !item.audioQuality && Boolean(item.videoQuality || item.squareImage || item.imageId);
+  }
+
+  if (bucket === 'playlists') {
+    return !item.audioQuality && !item.videoQuality
+      && Boolean(item.uuid || item.squareImage || item.description != null);
+  }
+
+  return true;
+}
+
 function normalizeOfficialTidalSearchItem(item, bucket) {
   if (!item || typeof item !== 'object') return item;
 
@@ -919,7 +943,9 @@ async function searchOfficialTidal({ q, s, a, al, v, p, i, limit = 20, offset = 
     const normalizeBucket = (bucketName) => {
       const bucket = raw?.[bucketName] || {};
       const items = Array.isArray(bucket?.items)
-        ? bucket.items.map(item => normalizeOfficialTidalSearchItem(item, bucketName))
+        ? bucket.items
+            .filter(item => matchesOfficialTidalBucket(item, bucketName))
+            .map(item => normalizeOfficialTidalSearchItem(item, bucketName))
         : [];
       return {
         limit: Number(bucket?.limit ?? limit),
@@ -960,7 +986,11 @@ async function searchOfficialTidal({ q, s, a, al, v, p, i, limit = 20, offset = 
   }
 
   const bucket = raw?.[config.bucket] || {};
-  const items = Array.isArray(bucket?.items) ? bucket.items.map(item => normalizeOfficialTidalSearchItem(item, config.bucket)) : [];
+  const items = Array.isArray(bucket?.items)
+    ? bucket.items
+        .filter(item => matchesOfficialTidalBucket(item, config.bucket))
+        .map(item => normalizeOfficialTidalSearchItem(item, config.bucket))
+    : [];
   const total = Number(bucket?.totalNumberOfItems ?? bucket?.total ?? items.length ?? 0);
 
   return {
@@ -1122,6 +1152,58 @@ function dedupeSearchItems(items) {
   return uniqueItems;
 }
 
+function filterSearchItemsByKind(items, kind = 'track') {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  if (kind === 'track') return items;
+
+  return items.filter((item) => {
+    if (!item || typeof item !== 'object') return false;
+
+    const looksLikeTrack = Boolean(
+      item.audioQuality
+      || item.streamReady
+      || item.allowStreaming
+      || item.isrc
+      || item.replayGain != null
+      || item.trackNumber != null
+      || item.duration != null
+    );
+
+    if (kind === 'artist') {
+      return !looksLikeTrack && Boolean(item.name) && !item.album;
+    }
+
+    if (kind === 'album') {
+      return !looksLikeTrack && Boolean(
+        item.cover
+        || item.imageCover
+        || item.releaseDate
+        || item.numberOfTracks != null
+      );
+    }
+
+    if (kind === 'video') {
+      return !item.audioQuality && Boolean(
+        item.videoQuality
+        || item.squareImage
+        || item.imageId
+        || item.type === 'video'
+      );
+    }
+
+    if (kind === 'playlist') {
+      return !looksLikeTrack && Boolean(
+        item.uuid
+        || item.squareImage
+        || item.description != null
+        || item.numberOfTracks != null
+      );
+    }
+
+    return true;
+  });
+}
+
 async function runLegacySearchQuery({ searchQuery, rawQuery, kind, limit, offset }) {
   const envSearch = process.env.SEARCH_API && process.env.SEARCH_API.trim()
     ? process.env.SEARCH_API.replace(/\/+$/, '')
@@ -1149,7 +1231,8 @@ async function runLegacySearchQuery({ searchQuery, rawQuery, kind, limit, offset
       resolvedLimit = Number(remote.limit ?? resolvedLimit);
     }
 
-    const rankedItems = rankSearchItems(dedupeSearchItems(items), rawQuery, kind);
+    const filteredItems = filterSearchItemsByKind(dedupeSearchItems(items), kind);
+    const rankedItems = rankSearchItems(filteredItems, rawQuery, kind);
     return {
       version: remote.version || '2.4',
       data: {
@@ -1173,7 +1256,8 @@ async function runLegacySearchQuery({ searchQuery, rawQuery, kind, limit, offset
     .filter(r => r.ok && r.data)
     .flatMap(r => r.data?.data?.items ?? r.data?.items ?? []);
 
-  const rankedItems = rankSearchItems(dedupeSearchItems(combinedItems), rawQuery, kind);
+  const filteredItems = filterSearchItemsByKind(dedupeSearchItems(combinedItems), kind);
+  const rankedItems = rankSearchItems(filteredItems, rawQuery, kind);
   return {
     version: '2.4',
     data: {
@@ -2779,6 +2863,7 @@ app.get('/api/video/proxy', async (req, res) => {
     if (!targetUrl || !isAllowedVideoProxyUrl(targetUrl)) {
       return res.status(400).json({ error: 'URL de video no permitida' });
     }
+    const expectsManifest = targetUrl.toLowerCase().includes('.m3u8');
 
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
@@ -2786,12 +2871,19 @@ app.get('/api/video/proxy', async (req, res) => {
     const upstream = await axios({
       method: 'GET',
       url: targetUrl,
-      responseType: 'stream',
+      responseType: expectsManifest ? 'text' : 'stream',
       timeout: 0,
       validateStatus: () => true,
+      decompress: false,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
       headers: {
         ...(req.headers.range ? { Range: req.headers.range } : {}),
-        'User-Agent': req.get('user-agent') || 'Yupify/1.0'
+        'User-Agent': req.get('user-agent') || 'Yupify/1.0',
+        'Accept-Encoding': 'identity',
+        'Accept': expectsManifest
+          ? 'application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*'
+          : '*/*'
       }
     });
 
@@ -2804,25 +2896,23 @@ app.get('/api/video/proxy', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
 
     if (upstream.status >= 400) {
-      upstream.data.pipe(res);
+      if (typeof upstream.data === 'string' || Buffer.isBuffer(upstream.data)) {
+        res.end(upstream.data);
+      } else {
+        upstream.data.pipe(res);
+      }
       return;
     }
 
-    if (contentType.includes('mpegurl') || targetUrl.toLowerCase().includes('.m3u8')) {
-      let manifestText = '';
-      upstream.data.setEncoding('utf8');
-      upstream.data.on('data', chunk => { manifestText += chunk; });
-      upstream.data.on('end', () => {
-        const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
-        res.end(rewritten);
-      });
-      upstream.data.on('error', () => {
-        if (!res.headersSent) {
-          res.status(502).json({ error: 'Error al leer manifest de video' });
-        } else {
-          res.end();
-        }
-      });
+    if (contentType.includes('mpegurl') || expectsManifest) {
+      const manifestText = typeof upstream.data === 'string'
+        ? upstream.data
+        : Buffer.isBuffer(upstream.data)
+          ? upstream.data.toString('utf8')
+          : '';
+      const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.end(rewritten);
       return;
     }
 
@@ -2835,8 +2925,16 @@ app.get('/api/video/proxy', async (req, res) => {
     });
     upstream.data.pipe(res);
   } catch (error) {
-    console.error('Error en /api/video/proxy:', error.message);
-    return res.status(500).json({ error: 'Error interno al proxificar video' });
+    const upstreamStatus = error?.response?.status || null;
+    const upstreamData = typeof error?.response?.data === 'string'
+      ? error.response.data.slice(0, 300)
+      : null;
+    console.error('Error en /api/video/proxy:', error.message, 'status:', upstreamStatus, 'url:', req.query.url || '', 'body:', upstreamData);
+    return res.status(502).json({
+      error: 'Error al proxificar video',
+      details: error?.message || 'Unknown proxy error',
+      upstreamStatus
+    });
   }
 });
 
@@ -3013,7 +3111,7 @@ app.get('/api/search', async (req, res) => {
       ? getOfficialTidalSearchConfig({ q, s, a, al, v, p, i })
       : null;
     const searchMode = officialSearchConfig
-      ? (officialSearchConfig.global ? 'tidal-official-global-v2' : `tidal-official-${officialSearchConfig.bucket}-v2`)
+      ? (officialSearchConfig.global ? 'tidal-official-global-v3' : `tidal-official-${officialSearchConfig.bucket}-v3`)
       : ((q || s) ? 'legacy-global-v2' : 'legacy-v2');
 
     const cacheKey = `search:${searchMode}:${searchQuery}|li:${limit}|offset:${offset}`;
@@ -3104,7 +3202,7 @@ app.get('/api/search', async (req, res) => {
       ? getOfficialTidalSearchConfig({ q, s, a, al, v, p, i })
       : null;
     const searchMode = officialSearchConfig
-      ? (officialSearchConfig.global ? 'tidal-official-global-v2' : `tidal-official-${officialSearchConfig.bucket}-v2`)
+      ? (officialSearchConfig.global ? 'tidal-official-global-v3' : `tidal-official-${officialSearchConfig.bucket}-v3`)
       : 'legacy-v1';
 
     // Si se especifica SEARCH_API en env, usar solo esa URL
