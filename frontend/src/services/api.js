@@ -39,6 +39,8 @@ const resolveApiUrl = (value) => {
   return joinUrl(API_URL, raw);
 };
 
+export const buildApiUrl = (value) => resolveApiUrl(value);
+
 const isLocalhostUrl = (value) =>
   /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(String(value || '').trim());
 

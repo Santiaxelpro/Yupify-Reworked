@@ -1,10 +1,50 @@
 // src/hooks/useAudio.js
 import { useState, useRef, useEffect, useCallback } from 'react';
-import api from '../services/api';
+import api, { buildApiUrl } from '../services/api';
 
 let shakaPlayer = null;
 const inlineManifestStore = new Map();
 let inlineSchemeRegistered = false;
+const shakaAudioProxyFilterPlayers = new WeakSet();
+
+const isTidalAudioUrl = (value) => {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const hostname = parsed.hostname.toLowerCase();
+    return hostname === 'audio.tidal.com' || hostname.endsWith('.audio.tidal.com');
+  } catch {
+    return false;
+  }
+};
+
+const buildTidalAudioProxyUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw || !isTidalAudioUrl(raw)) return raw;
+  return `${buildApiUrl('/api/audio/proxy')}?url=${encodeURIComponent(raw)}`;
+};
+
+const registerShakaAudioProxyFilter = (player) => {
+  if (!player || shakaAudioProxyFilterPlayers.has(player)) return;
+  const engine = typeof player.getNetworkingEngine === 'function'
+    ? player.getNetworkingEngine()
+    : null;
+  if (!engine || typeof engine.registerRequestFilter !== 'function') return;
+
+  engine.registerRequestFilter((_type, request) => {
+    if (!request || !Array.isArray(request.uris)) return;
+    let rewritten = false;
+    request.uris = request.uris.map((uri) => {
+      const proxied = buildTidalAudioProxyUrl(uri);
+      if (proxied !== uri) rewritten = true;
+      return proxied;
+    });
+    if (rewritten) {
+      request.allowCrossSiteCredentials = false;
+    }
+  });
+
+  shakaAudioProxyFilterPlayers.add(player);
+};
 
 const registerInlineScheme = () => {
   if (inlineSchemeRegistered || !window?.shaka?.net?.NetworkingEngine) return;
@@ -94,6 +134,7 @@ const initShakaPlayer = async (audioElement) => {
           registerInlineScheme();
           // Crear Player sin mediaElement (attach() es la forma recomendada)
           const player = new window.shaka.Player();
+          registerShakaAudioProxyFilter(player);
           player.addEventListener?.('error', (event) => {
             console.error('Shaka player error:', event?.detail || event);
           });
@@ -106,6 +147,7 @@ const initShakaPlayer = async (audioElement) => {
     } else {
       registerInlineScheme();
       const player = new window.shaka.Player();
+      registerShakaAudioProxyFilter(player);
       player.addEventListener?.('error', (event) => {
         console.error('Shaka player error:', event?.detail || event);
       });

@@ -1338,6 +1338,135 @@ async function fetchRecommendationsFromAPIs(params) {
   return fallback ? fallback.data : null;
 }
 
+function isAllowedVideoProxyUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      hostname.endsWith('.tidal.com')
+      || hostname === 'resources.tidal.com'
+      || hostname.endsWith('.video.tidal.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedAudioProxyUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      hostname === 'audio.tidal.com'
+      || hostname.endsWith('.audio.tidal.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function buildVideoProxyUrl(req, rawUrl) {
+  if (!rawUrl || !isAllowedVideoProxyUrl(rawUrl)) return null;
+  return `${req.protocol}://${req.get('host')}/api/video/proxy?url=${encodeURIComponent(rawUrl)}`;
+}
+
+function buildAudioProxyUrl(req, rawUrl) {
+  if (!rawUrl || !isAllowedAudioProxyUrl(rawUrl)) return null;
+  return `${req.protocol}://${req.get('host')}/api/audio/proxy?url=${encodeURIComponent(rawUrl)}`;
+}
+
+function inferTidalAudioFetchDestination(targetUrl) {
+  try {
+    const pathname = new URL(targetUrl).pathname.toLowerCase();
+    if (pathname.endsWith('.mp4') || pathname.endsWith('.m4s')) {
+      return 'video';
+    }
+  } catch {
+    // Ignore parse errors and fall back to audio.
+  }
+  return 'audio';
+}
+
+function buildTidalAudioRequestHeaders(req, targetUrl, options = {}) {
+  const readHeader = (name) => {
+    if (typeof req?.get === 'function') {
+      const value = req.get(name);
+      if (value) return value;
+    }
+    return '';
+  };
+
+  const headers = {
+    Accept: readHeader('accept') || '*/*',
+    'Accept-Language': readHeader('accept-language') || 'es-419,es-US;q=0.9,es;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'identity',
+    'User-Agent': readHeader('user-agent') || process.env.TIDAL_MEDIA_USER_AGENT || AUDIO_CACHE_DASH_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+    Referer: targetUrl,
+    Connection: 'keep-alive'
+  };
+
+  const passthroughHeaders = {
+    'cache-control': 'Cache-Control',
+    'if-modified-since': 'If-Modified-Since',
+    'if-none-match': 'If-None-Match',
+    pragma: 'Pragma',
+    priority: 'Priority',
+    range: 'Range',
+    'sec-ch-ua': 'Sec-CH-UA',
+    'sec-ch-ua-mobile': 'Sec-CH-UA-Mobile',
+    'sec-ch-ua-platform': 'Sec-CH-UA-Platform',
+    'sec-fetch-dest': 'Sec-Fetch-Dest',
+    'sec-fetch-mode': 'Sec-Fetch-Mode',
+    'sec-fetch-site': 'Sec-Fetch-Site',
+    'sec-gpc': 'Sec-GPC'
+  };
+
+  Object.entries(passthroughHeaders).forEach(([incoming, outgoing]) => {
+    const value = readHeader(incoming);
+    if (value) headers[outgoing] = value;
+  });
+
+  if (!headers['Sec-Fetch-Dest']) headers['Sec-Fetch-Dest'] = options.destination || 'audio';
+  if (!headers['Sec-Fetch-Mode']) headers['Sec-Fetch-Mode'] = 'no-cors';
+  if (!headers['Sec-Fetch-Site']) headers['Sec-Fetch-Site'] = 'same-origin';
+  if (!headers['Sec-GPC']) headers['Sec-GPC'] = '1';
+  if (!headers.Priority) headers.Priority = 'i';
+  if (!headers.Range && options.forceRange !== false) {
+    headers.Range = options.range || 'bytes=0-';
+  }
+
+  return headers;
+}
+
+function absolutizeUrl(value, baseUrl) {
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
+}
+
+function rewriteM3u8Manifest(manifestText, baseUrl, req) {
+  return String(manifestText || '')
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      const keyMatch = line.match(/URI="([^"]+)"/i);
+      if (keyMatch) {
+        const absolute = absolutizeUrl(keyMatch[1], baseUrl);
+        const proxied = buildVideoProxyUrl(req, absolute);
+        return proxied ? line.replace(keyMatch[1], proxied) : line;
+      }
+
+      if (trimmed.startsWith('#')) return line;
+      const absolute = absolutizeUrl(trimmed, baseUrl);
+      const proxied = buildVideoProxyUrl(req, absolute);
+      return proxied || line;
+    })
+    .join('\n');
+}
 function normalizeSeedKey(title, artist) {
   const t = (title || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
   const a = (artist || '').toString().toLowerCase().replace(/[^a-z0-9\u00e0-\u00ff\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -1924,7 +2053,19 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
 }
 
 async function downloadToFile(url, destPath) {
-  const response = await axios.get(url, { responseType: 'stream', timeout: 0 });
+  const requestConfig = {
+    responseType: 'stream',
+    timeout: 0
+  };
+
+  if (isAllowedAudioProxyUrl(url)) {
+    requestConfig.headers = buildTidalAudioRequestHeaders(null, url, {
+      forceRange: true,
+      destination: inferTidalAudioFetchDestination(url)
+    });
+  }
+
+  const response = await axios.get(url, requestConfig);
   await pipeline(response.data, fs.createWriteStream(destPath));
 }
 
@@ -2711,14 +2852,21 @@ app.get('/api/track/:id', async (req, res) => {
         usedQuality = reportedQuality;
       }
 
+      const directStreamUrl = streamUrl || respData.url || null;
+      const playbackUrl = !isDashMime(respData?.manifestMimeType)
+        ? (buildAudioProxyUrl(req, directStreamUrl) || directStreamUrl)
+        : directStreamUrl;
+
       const payload = {
         ...respData,
+        url: playbackUrl,
+        directUrl: directStreamUrl,
         requestedQuality: requestedQuality,
         usedQuality: usedQuality
       };
       setCache(cacheKey, payload, CACHE_TTL.track);
       const runAudioCache = async () => {
-        let cacheUrl = streamUrl || respData.url || null;
+        let cacheUrl = directStreamUrl;
         let cacheQuality = usedQuality;
         const dashManifest = (isDashMime(respData.manifestMimeType) && typeof respData.manifest === 'string')
           ? respData.manifest
@@ -2833,6 +2981,118 @@ app.get('/api/video/:id', async (req, res) => {
   }
 });
 
+app.get('/api/video/proxy', async (req, res) => {
+  try {
+    const targetUrl = (req.query.url || '').toString().trim();
+    if (!targetUrl || !isAllowedVideoProxyUrl(targetUrl)) {
+      return res.status(400).json({ error: 'URL de video no permitida' });
+    }
+
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+
+    const upstream = await axios({
+      method: 'GET',
+      url: targetUrl,
+      responseType: 'stream',
+      timeout: 0,
+      validateStatus: () => true,
+      headers: {
+        ...(req.headers.range ? { Range: req.headers.range } : {}),
+        'User-Agent': req.get('user-agent') || 'Yupify/1.0'
+      }
+    });
+
+    const contentType = String(upstream.headers['content-type'] || '').toLowerCase();
+    res.status(upstream.status);
+    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    res.setHeader('Cache-Control', 'no-store');
+
+    if (upstream.status >= 400) {
+      upstream.data.pipe(res);
+      return;
+    }
+
+    if (contentType.includes('mpegurl') || targetUrl.toLowerCase().includes('.m3u8')) {
+      let manifestText = '';
+      upstream.data.setEncoding('utf8');
+      upstream.data.on('data', chunk => { manifestText += chunk; });
+      upstream.data.on('end', () => {
+        const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
+        res.end(rewritten);
+      });
+      upstream.data.on('error', () => {
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'Error al leer manifest de video' });
+        } else {
+          res.end();
+        }
+      });
+      return;
+    }
+
+    upstream.data.on('error', () => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Error al proxificar video' });
+      } else {
+        res.end();
+      }
+    });
+    upstream.data.pipe(res);
+  } catch (error) {
+    console.error('Error en /api/video/proxy:', error.message);
+    return res.status(500).json({ error: 'Error interno al proxificar video' });
+  }
+});
+
+app.get('/api/audio/proxy', async (req, res) => {
+  try {
+    const targetUrl = (req.query.url || '').toString().trim();
+    if (!targetUrl || !isAllowedAudioProxyUrl(targetUrl)) {
+      return res.status(400).json({ error: 'URL de audio no permitida' });
+    }
+
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+
+    const upstream = await axios({
+      method: 'GET',
+      url: targetUrl,
+      responseType: 'stream',
+      timeout: 0,
+      validateStatus: () => true,
+      headers: buildTidalAudioRequestHeaders(req, targetUrl, {
+        forceRange: true,
+        destination: inferTidalAudioFetchDestination(targetUrl)
+      })
+    });
+
+    res.status(upstream.status);
+    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    if (upstream.headers.etag) res.setHeader('ETag', upstream.headers.etag);
+    if (upstream.headers['last-modified']) res.setHeader('Last-Modified', upstream.headers['last-modified']);
+    res.setHeader('Cache-Control', 'no-store');
+
+    upstream.data.on('error', () => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Error al proxificar audio' });
+      } else {
+        res.end();
+      }
+    });
+
+    upstream.data.pipe(res);
+  } catch (error) {
+    console.error('Error en /api/audio/proxy:', error.message);
+    return res.status(500).json({ error: 'Error interno al proxificar audio' });
+  }
+});
 // Servir audio cacheado desde Google Drive
 app.get('/api/audio/file/:fileId', async (req, res) => {
   try {
@@ -3474,7 +3734,7 @@ app.get('/api/lyrics', async (req, res) => {
 
     const providerUrls = {
       santiax: 'https://lyricsplus.itzsantiax.qzz.io/v2/lyrics/get',
-      binimum: 'https://lyricsplus.binimum.org/v2/lyrics/get',
+      binimum: 'https://lyrics.geeked.wtf/v2/lyrics/get',
       prjktla: 'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get',
       atomix:  'https://lyricsplus.atomix.one/v2/lyrics/get',
       vercel:  'https://lyricsplus-seven.vercel.app/v2/lyrics/get'
