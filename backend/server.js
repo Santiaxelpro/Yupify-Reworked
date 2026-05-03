@@ -665,40 +665,118 @@ const HIFI_APIS = {
   ]
 };
 
-async function getRandomAPI() {
-  const allAPIs = Object.values(HIFI_APIS).flat();
-  const healthy = [];
+const HIFI_UPTIME_URL = (process.env.HIFI_UPTIME_URL || 'https://tidal-uptime.geeked.wtf/').toString().trim() || 'https://tidal-uptime.geeked.wtf/';
+const parsedHifiUptimeTtl = Number(process.env.HIFI_UPTIME_TTL_MS);
+const HIFI_UPTIME_TTL_MS = Number.isFinite(parsedHifiUptimeTtl) && parsedHifiUptimeTtl >= 0
+  ? parsedHifiUptimeTtl
+  : 60 * 1000;
+const HIFI_UPTIME_TIMEOUT_MS = 5000;
+const hifiApiState = {
+  apis: [],
+  apiType: null,
+  fetchedAt: 0,
+  source: 'local-fallback',
+  lastUpdated: null,
+  lastError: null,
+  inFlight: null
+};
 
-  const checks = await Promise.allSettled(
-    allAPIs.map(api => {
-      const clean = api.replace(/\/+$/, "").trim();
+function normalizeHifiApi(value) {
+  const raw = typeof value === 'string' ? value : value?.url;
+  let api = (raw || '').toString().trim();
+  if (!api) return '';
+  if (!/^https?:\/\//i.test(api)) {
+    api = `https://${api}`;
+  }
+  try {
+    const parsed = new URL(api);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
 
-      // Forzar https:// si no existe
-      const fixed = clean.startsWith("http") ? clean : `https://${clean}`;
+function dedupeHifiApis(values) {
+  const seen = new Set();
+  const apis = [];
+  for (const value of values || []) {
+    const api = normalizeHifiApi(value);
+    if (!api || seen.has(api)) continue;
+    seen.add(api);
+    apis.push(api);
+  }
+  return apis;
+}
 
-      return axios.get(`${fixed}`, { timeout: 3000 })
-        .then(resp => {
-          const data = resp?.data;
-          const version = String(data?.version || '').trim();
-          if (/^2\./.test(version)) {
-            return fixed;
-          }
-          return null;
-        })
-        .catch(() => null);
-    })
-  );
+function getLocalHifiApis() {
+  return dedupeHifiApis(Object.values(HIFI_APIS).flat());
+}
 
-  for (const c of checks) {
-    if (c.status === "fulfilled" && c.value) healthy.push(c.value);
+async function fetchHifiUptimeApis() {
+  const response = await axiosFast.get(HIFI_UPTIME_URL, { timeout: HIFI_UPTIME_TIMEOUT_MS });
+  const payload = response.data || {};
+  const apis = dedupeHifiApis(Array.isArray(payload.api) ? payload.api : []);
+  if (apis.length === 0) {
+    throw new Error('HIFI uptime returned no active API endpoints');
+  }
+  return {
+    apis,
+    lastUpdated: typeof payload.lastUpdated === 'string' ? payload.lastUpdated : null
+  };
+}
+
+async function getAvailableHifiApis() {
+  const now = Date.now();
+  const cacheIsFresh = hifiApiState.apis.length > 0
+    && (HIFI_UPTIME_TTL_MS === 0 ? false : now - hifiApiState.fetchedAt < HIFI_UPTIME_TTL_MS);
+
+  if (cacheIsFresh) {
+    hifiApiState.source = hifiApiState.apiType === 'uptime' ? 'cache' : 'local-fallback';
+    return hifiApiState.apis;
   }
 
-  if (healthy.length === 0) {
+  if (!hifiApiState.inFlight) {
+    hifiApiState.inFlight = fetchHifiUptimeApis()
+      .then(({ apis, lastUpdated }) => {
+        hifiApiState.apis = apis;
+        hifiApiState.apiType = 'uptime';
+        hifiApiState.fetchedAt = Date.now();
+        hifiApiState.source = 'uptime';
+        hifiApiState.lastUpdated = lastUpdated;
+        hifiApiState.lastError = null;
+        return apis;
+      })
+      .catch((err) => {
+        hifiApiState.lastError = err?.message || String(err);
+        if (hifiApiState.apis.length > 0 && hifiApiState.apiType === 'uptime') {
+          hifiApiState.source = 'cache';
+          return hifiApiState.apis;
+        }
+        const fallbackApis = getLocalHifiApis();
+        hifiApiState.apis = fallbackApis;
+        hifiApiState.apiType = 'local-fallback';
+        hifiApiState.fetchedAt = Date.now();
+        hifiApiState.source = 'local-fallback';
+        return fallbackApis;
+      })
+      .finally(() => {
+        hifiApiState.inFlight = null;
+      });
+  }
+
+  return hifiApiState.inFlight;
+}
+
+async function getRandomAPI() {
+  const allAPIs = await getAvailableHifiApis();
+
+  if (allAPIs.length === 0) {
     console.error("No hay APIs HiFi disponibles");
     throw new Error("No hay APIs HiFi disponibles");
   }
 
-  return healthy[Math.floor(Math.random() * healthy.length)];
+  return allAPIs[Math.floor(Math.random() * allAPIs.length)];
 }
 
 async function _searchInAPI(apiBase, query, limit = 1) {
@@ -725,7 +803,7 @@ async function searchAnyAPI(query, limit = 1) {
     return Array.isArray(items) ? items : [];
   }
 
-  const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+  const allAPIs = await getAvailableHifiApis();
   const requests = allAPIs.map(api =>
     axios.get(`${api}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`, { timeout: 10000 })
       .then(r => ({ ok: true, data: r.data }))
@@ -1265,7 +1343,7 @@ async function runLegacySearchQuery({ searchQuery, rawQuery, kind, limit, offset
     };
   }
 
-  const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+  const allAPIs = await getAvailableHifiApis();
   const requests = allAPIs.map(api =>
     axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
       .then(r => ({ ok: true, data: r.data }))
@@ -1319,7 +1397,7 @@ async function buildLegacyGlobalSearchPayload(rawQuery, limit, offset) {
 }
 
 async function fetchRecommendationsFromAPIs(params) {
-  const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+  const allAPIs = await getAvailableHifiApis();
   const requests = allAPIs.map(api =>
     axios.get(`${api}/recommendations/?${params}`, { timeout: 10000 })
       .then(r => ({ ok: true, api, data: r.data }))
@@ -1976,7 +2054,7 @@ async function resolveTrackForDownload(id, qRaw) {
     "LOW": ["LOW", "HIGH", "LOSSLESS"]
   };
   const qualitiesToTry = qualityFallback[requestedQuality] || [requestedQuality];
-  const allAPIs = Object.values(HIFI_APIS).flat();
+  const allAPIs = await getAvailableHifiApis();
   const shuffledAPIs = shuffleArray(allAPIs);
   const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
 
@@ -2642,7 +2720,7 @@ app.get('/api/track/:id', async (req, res) => {
     const qualitiesToTry = qualityFallback[requestedQuality] || [requestedQuality];
 
     // Todas las APIs
-    const allAPIs = Object.values(HIFI_APIS).flat();
+    const allAPIs = await getAvailableHifiApis();
     const shuffledAPIs = shuffleArray(allAPIs);
     const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
 
@@ -2774,7 +2852,7 @@ app.get('/api/video/:id', async (req, res) => {
       return res.json(cached);
     }
 
-    const allAPIs = Object.values(HIFI_APIS).flat();
+    const allAPIs = await getAvailableHifiApis();
     const shuffledAPIs = shuffleArray(allAPIs);
     const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
 
@@ -3170,8 +3248,8 @@ app.get('/api/search', async (req, res) => {
       return res.json(rankedPayload);
     }
 
-    // Por defecto: consultar todas las APIs listadas en HIFI_APIS en paralelo
-    const allAPIs = Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, ''));
+    // Por defecto: consultar todas las APIs HiFi activas en paralelo
+    const allAPIs = await getAvailableHifiApis();
 
     const requests = allAPIs.map(api =>
       axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
@@ -3625,7 +3703,7 @@ app.get('/api/lyrics', async (req, res) => {
     }
 
     if (trackId) {
-      const allLyricsApis = shuffleArray(Object.values(HIFI_APIS).flat().map(a => a.replace(/\/+$/, '')));
+      const allLyricsApis = shuffleArray(await getAvailableHifiApis());
       let idFallbackPayload = null;
 
       for (const apiBase of allLyricsApis) {
@@ -4341,6 +4419,7 @@ app.get('/api/user/stats', authMiddleware, (req, res) => {
 
 app.get('/health', async (req, res) => {
   try {
+    const hifiApis = await getAvailableHifiApis();
     let usersCount = db.users.size;
     if (pool) {
       const result = await pool.query('SELECT COUNT(*) FROM users');
@@ -4351,13 +4430,24 @@ app.get('/health', async (req, res) => {
       status: 'ok', 
       timestamp: new Date().toISOString(),
       apis: Object.keys(HIFI_APIS),
+      hifiApiSource: hifiApiState.source,
+      hifiApiCount: hifiApis.length,
+      hifiUptimeUrl: HIFI_UPTIME_URL,
+      hifiUptimeLastUpdated: hifiApiState.lastUpdated,
+      hifiApiLastError: hifiApiState.lastError || undefined,
       users: usersCount
     });
   } catch (error) {
+    const hifiApis = hifiApiState.apis.length > 0 ? hifiApiState.apis : getLocalHifiApis();
     res.json({ 
       status: 'ok', 
       timestamp: new Date().toISOString(),
       apis: Object.keys(HIFI_APIS),
+      hifiApiSource: hifiApiState.source,
+      hifiApiCount: hifiApis.length,
+      hifiUptimeUrl: HIFI_UPTIME_URL,
+      hifiUptimeLastUpdated: hifiApiState.lastUpdated,
+      hifiApiLastError: hifiApiState.lastError || undefined,
       users: db.users.size
     });
   }
@@ -4390,7 +4480,8 @@ app.use((err, req, res, _next) => {
 // Iniciar servidor
 app.listen(PORT, () => {
   console.log(`🎵 Yupify Backend iniciado en http://localhost:${PORT}`);
-  console.log(`📡 APIs disponibles: ${Object.keys(HIFI_APIS).join(', ')}`);
+  console.log(`📡 HIFI uptime: ${HIFI_UPTIME_URL} (ttl ${HIFI_UPTIME_TTL_MS}ms)`);
+  console.log(`📡 APIs fallback: ${Object.keys(HIFI_APIS).join(', ')}`);
   console.log(`🔒 Autenticación: JWT`);
   console.log(`💾 Base de datos: ${pool ? 'PostgreSQL' : 'En memoria (usar PostgreSQL/MongoDB en producción)'}`);
   console.log(`🧩 DATABASE_URL presente: ${Boolean(process.env.DATABASE_URL)}`);
