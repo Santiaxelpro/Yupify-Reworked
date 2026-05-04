@@ -552,7 +552,14 @@ const FAST_TRACK_POOL = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const TRACK_TIMEOUT_MS = 4500;
 const QOBUZ_FALLBACK_ENABLED = process.env.QOBUZ_FALLBACK_ENABLED !== 'false';
-const QOBUZ_API_BASE = (process.env.QOBUZ_API_BASE || 'https://qobuz.kennyy.com.br').toString().replace(/\/+$/, '');
+const DEFAULT_QOBUZ_API_BASES = ['https://qobuz.kennyy.com.br', 'https://qbz.spotisaver.net', 'https://qobuz.squid.wtf'];
+const QOBUZ_API_BASES = dedupeStrings(
+  (process.env.QOBUZ_API_BASES || process.env.QOBUZ_API_BASE || DEFAULT_QOBUZ_API_BASES.join(','))
+    .toString()
+    .split(',')
+    .map(normalizeQobuzApiBase)
+    .filter(Boolean)
+);
 
 
 // Cache simple en memoria para trending
@@ -2313,6 +2320,25 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
   }
 }
 
+function dedupeStrings(values) {
+  return Array.from(new Set((values || []).filter(Boolean)));
+}
+
+function normalizeQobuzApiBase(value) {
+  let base = (value || '').toString().trim();
+  if (!base) return '';
+  if (!/^https?:\/\//i.test(base)) {
+    base = `https://${base}`;
+  }
+  try {
+    const parsed = new URL(base);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
 function mapTidalQualityToQobuzQuality(quality) {
   const normalized = (quality || '').toString().toUpperCase().trim();
   if (normalized === 'LOW' || normalized === 'HIGH') return '5';
@@ -2418,37 +2444,50 @@ function buildQobuzFallbackPayload({ id, tidalTrack, qobuzTrack, streamUrl, requ
 }
 
 async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIMEOUT_MS }) {
-  if (!QOBUZ_FALLBACK_ENABLED || !QOBUZ_API_BASE) return null;
+  if (!QOBUZ_FALLBACK_ENABLED || QOBUZ_API_BASES.length === 0) return null;
 
   try {
     const tidalTrack = await fetchOfficialTidalTrackInfo(id, timeoutMs);
     const isrc = (tidalTrack?.isrc || '').toString().trim();
     if (!isrc) return null;
 
-    const searchUrl = `${QOBUZ_API_BASE}/api/get-music?q=${encodeURIComponent(isrc)}&offset=0`;
-    const searchResponse = await axiosFast.get(searchUrl, { timeout: Math.max(timeoutMs, 10000) });
-    const qobuzTrack = pickQobuzTrack(extractQobuzTrackItems(searchResponse.data), isrc);
-    const qobuzTrackId = qobuzTrack?.id || qobuzTrack?.track_id || qobuzTrack?.trackId;
-    if (!qobuzTrackId) return null;
+    for (const qobuzApiBase of QOBUZ_API_BASES) {
+      try {
+        const searchUrl = `${qobuzApiBase}/api/get-music?q=${encodeURIComponent(isrc)}&offset=0`;
+        const searchResponse = await axiosFast.get(searchUrl, { timeout: Math.max(timeoutMs, 10000) });
+        const qobuzTrack = pickQobuzTrack(extractQobuzTrackItems(searchResponse.data), isrc);
+        const qobuzTrackId = qobuzTrack?.id || qobuzTrack?.track_id || qobuzTrack?.trackId;
+        if (!qobuzTrackId) continue;
 
-    const qobuzQuality = mapTidalQualityToQobuzQuality(quality);
-    const downloadUrl = `${QOBUZ_API_BASE}/api/download-music?track_id=${encodeURIComponent(qobuzTrackId)}&quality=${encodeURIComponent(qobuzQuality)}`;
-    const downloadResponse = await axiosFast.get(downloadUrl, { timeout: Math.max(timeoutMs, 15000) });
-    const streamUrl = getQobuzDownloadUrl(downloadResponse.data);
-    if (!streamUrl) return null;
+        const qobuzQuality = mapTidalQualityToQobuzQuality(quality);
+        const downloadUrl = `${qobuzApiBase}/api/download-music?track_id=${encodeURIComponent(qobuzTrackId)}&quality=${encodeURIComponent(qobuzQuality)}`;
+        const downloadResponse = await axiosFast.get(downloadUrl, { timeout: Math.max(timeoutMs, 15000) });
+        const streamUrl = getQobuzDownloadUrl(downloadResponse.data);
+        if (!streamUrl) continue;
 
-    return {
-      ok: true,
-      url: downloadUrl,
-      data: buildQobuzFallbackPayload({
-        id,
-        tidalTrack,
-        qobuzTrack,
-        streamUrl,
-        requestedQuality: quality,
-        qobuzQuality
-      })
-    };
+        return {
+          ok: true,
+          url: downloadUrl,
+          data: {
+            ...buildQobuzFallbackPayload({
+              id,
+              tidalTrack,
+              qobuzTrack,
+              streamUrl,
+              requestedQuality: quality,
+              qobuzQuality
+            }),
+            qobuzApiBase
+          }
+        };
+      } catch (err) {
+        if (AUDIO_CACHE_DEBUG) {
+          console.warn('[qobuz-fallback] provider failed:', qobuzApiBase, err?.message || err);
+        }
+      }
+    }
+
+    return null;
   } catch (err) {
     if (AUDIO_CACHE_DEBUG) {
       console.warn('[qobuz-fallback] failed:', err?.message || err);
