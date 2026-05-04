@@ -551,6 +551,8 @@ const _FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const TRACK_TIMEOUT_MS = 4500;
+const QOBUZ_FALLBACK_ENABLED = process.env.QOBUZ_FALLBACK_ENABLED !== 'false';
+const QOBUZ_API_BASE = (process.env.QOBUZ_API_BASE || 'https://qobuz.kennyy.com.br').toString().replace(/\/+$/, '');
 
 
 // Cache simple en memoria para trending
@@ -2206,8 +2208,11 @@ async function resolveTrackForDownload(id, qRaw) {
     if (!success) {
       success = await fetchFirstTrackData({ apis: allAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
     }
+    if (!success) {
+      success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
+    }
     if (success) {
-      usedQuality = quality;
+      usedQuality = success.data?.usedQuality || quality;
       break;
     }
   }
@@ -2304,6 +2309,150 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
   try {
     return await Promise.any(requests);
   } catch {
+    return null;
+  }
+}
+
+function mapTidalQualityToQobuzQuality(quality) {
+  const normalized = (quality || '').toString().toUpperCase().trim();
+  if (normalized === 'LOW' || normalized === 'HIGH') return '5';
+  return '7';
+}
+
+function extractQobuzTrackItems(payload) {
+  const items = payload?.data?.tracks?.items
+    ?? payload?.tracks?.items
+    ?? payload?.data?.items
+    ?? payload?.items
+    ?? [];
+  return Array.isArray(items) ? items : [];
+}
+
+function pickQobuzTrack(items, isrc) {
+  const normalizedIsrc = (isrc || '').toString().trim().toUpperCase();
+  return items.find(item => (
+    normalizedIsrc
+    && (item?.isrc || '').toString().trim().toUpperCase() === normalizedIsrc
+    && item.streamable !== false
+  )) || items.find(item => item?.streamable !== false) || null;
+}
+
+function getQobuzDownloadUrl(payload) {
+  return payload?.data?.url
+    || payload?.url
+    || payload?.download_url
+    || payload?.downloadUrl
+    || payload?.stream_url
+    || payload?.streamUrl
+    || null;
+}
+
+function getQobuzUsedQuality(qobuzTrack, requestedQuality) {
+  const normalized = (requestedQuality || '').toString().toUpperCase().trim();
+  if (normalized === 'LOW' || normalized === 'HIGH') return normalized || 'HIGH';
+
+  const bitDepth = Number(qobuzTrack?.maximum_bit_depth || qobuzTrack?.album?.maximum_bit_depth || 0);
+  const sampleRate = Number(qobuzTrack?.maximum_sampling_rate || qobuzTrack?.album?.maximum_sampling_rate || 0);
+  if (bitDepth > 16 || sampleRate > 48 || qobuzTrack?.hires || qobuzTrack?.hires_streamable) {
+    return 'HI_RES_LOSSLESS';
+  }
+  return 'LOSSLESS';
+}
+
+async function fetchOfficialTidalTrackInfo(id, timeoutMs = TRACK_TIMEOUT_MS) {
+  if (!hasOfficialTidalSearchConfig()) return null;
+  const accessToken = await getOfficialTidalAccessToken();
+  const countryCode = (process.env.TIDAL_COUNTRY_CODE || 'US').toString().trim() || 'US';
+  const url = `https://api.tidal.com/v1/tracks/${encodeURIComponent(id)}/?countryCode=${encodeURIComponent(countryCode)}`;
+  const response = await axiosFast.get(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    },
+    timeout: Math.max(timeoutMs, 10000)
+  });
+  return response.data || null;
+}
+
+function buildQobuzFallbackPayload({ id, tidalTrack, qobuzTrack, streamUrl, requestedQuality, qobuzQuality }) {
+  const usedQuality = getQobuzUsedQuality(qobuzTrack, requestedQuality);
+  const tidalCover = normalizeOfficialTidalImageCover(tidalTrack?.album?.cover || tidalTrack?.cover);
+  const qobuzCoverUrl = qobuzTrack?.album?.image?.large || qobuzTrack?.album?.image?.small || null;
+  const artistName = tidalTrack?.artist?.name
+    || tidalTrack?.artists?.[0]?.name
+    || qobuzTrack?.performer?.name
+    || qobuzTrack?.album?.artist?.name
+    || '';
+  const coverUrl = buildCoverUrlFromTrack({ cover: tidalCover }, 1280)
+    || qobuzCoverUrl;
+
+  return {
+    id: Number(tidalTrack?.id || id) || id,
+    trackId: Number(tidalTrack?.id || id) || id,
+    title: tidalTrack?.title || qobuzTrack?.title || '',
+    version: tidalTrack?.version || qobuzTrack?.version || null,
+    artist: artistName,
+    artists: Array.isArray(tidalTrack?.artists)
+      ? tidalTrack.artists.map(a => ({ id: a.id, name: a.name })).filter(a => a.name)
+      : (artistName ? [{ name: artistName }] : []),
+    album: {
+      id: tidalTrack?.album?.id || qobuzTrack?.album?.qobuz_id || qobuzTrack?.album?.id || null,
+      title: tidalTrack?.album?.title || qobuzTrack?.album?.title || '',
+      cover: tidalCover || qobuzCoverUrl
+    },
+    cover: tidalCover || qobuzCoverUrl,
+    coverUrl,
+    duration: tidalTrack?.duration ?? qobuzTrack?.duration ?? null,
+    explicit: Boolean(tidalTrack?.explicit || qobuzTrack?.parental_warning),
+    isrc: tidalTrack?.isrc || qobuzTrack?.isrc || null,
+    audioQuality: usedQuality,
+    quality: usedQuality,
+    requestedQuality,
+    usedQuality,
+    assetPresentation: 'FULL',
+    manifestMimeType: qobuzQuality === '5' ? 'audio/mpeg' : 'audio/flac',
+    source: 'qobuz-fallback',
+    qobuzTrackId: qobuzTrack?.id || null,
+    url: streamUrl,
+    directUrl: streamUrl
+  };
+}
+
+async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIMEOUT_MS }) {
+  if (!QOBUZ_FALLBACK_ENABLED || !QOBUZ_API_BASE) return null;
+
+  try {
+    const tidalTrack = await fetchOfficialTidalTrackInfo(id, timeoutMs);
+    const isrc = (tidalTrack?.isrc || '').toString().trim();
+    if (!isrc) return null;
+
+    const searchUrl = `${QOBUZ_API_BASE}/api/get-music?q=${encodeURIComponent(isrc)}&offset=0`;
+    const searchResponse = await axiosFast.get(searchUrl, { timeout: Math.max(timeoutMs, 10000) });
+    const qobuzTrack = pickQobuzTrack(extractQobuzTrackItems(searchResponse.data), isrc);
+    const qobuzTrackId = qobuzTrack?.id || qobuzTrack?.track_id || qobuzTrack?.trackId;
+    if (!qobuzTrackId) return null;
+
+    const qobuzQuality = mapTidalQualityToQobuzQuality(quality);
+    const downloadUrl = `${QOBUZ_API_BASE}/api/download-music?track_id=${encodeURIComponent(qobuzTrackId)}&quality=${encodeURIComponent(qobuzQuality)}`;
+    const downloadResponse = await axiosFast.get(downloadUrl, { timeout: Math.max(timeoutMs, 15000) });
+    const streamUrl = getQobuzDownloadUrl(downloadResponse.data);
+    if (!streamUrl) return null;
+
+    return {
+      ok: true,
+      url: downloadUrl,
+      data: buildQobuzFallbackPayload({
+        id,
+        tidalTrack,
+        qobuzTrack,
+        streamUrl,
+        requestedQuality: quality,
+        qobuzQuality
+      })
+    };
+  } catch (err) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.warn('[qobuz-fallback] failed:', err?.message || err);
+    }
     return null;
   }
 }
@@ -2876,9 +3025,12 @@ app.get('/api/track/:id', async (req, res) => {
       if (!success) {
         success = await fetchFirstTrackData({ apis: allAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
       }
+      if (!success) {
+        success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
+      }
 
       if (success) {
-        usedQuality = quality;
+        usedQuality = success.data?.usedQuality || quality;
         console.log(`OK Track encontrado en calidad: ${quality}`);
         break;
       }
