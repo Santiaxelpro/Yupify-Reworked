@@ -667,6 +667,12 @@ const HIFI_APIS = {
   community: [
     'https://hifi-one.spotisaver.net',
     'https://hifi-two.spotisaver.net',
+    'https://hifi-spo.spotisaver.net',
+    'https://hifi-api2.spotisaver.net',
+    'https://hifi-api3.spotisaver.net',
+    'https://hifi-api4.spotisaver.net',
+    'https://hifi-api5.spotisaver.net',
+    'https://hifi-api6.spotisaver.net',
     'https://hifi.geeked.wtf'
   ],
   kinoplus: [
@@ -4886,6 +4892,9 @@ app.get('/health', async (req, res) => {
       hifiUptimeUrl: HIFI_UPTIME_URL,
       hifiUptimeLastUpdated: hifiApiState.lastUpdated,
       hifiApiLastError: hifiApiState.lastError || undefined,
+      qobuzFallbackEnabled: QOBUZ_FALLBACK_ENABLED,
+      qobuzApiCount: QOBUZ_API_BASES.length,
+      qobuzApis: QOBUZ_API_BASES,
       users: usersCount
     });
   } catch (error) {
@@ -4899,6 +4908,9 @@ app.get('/health', async (req, res) => {
       hifiUptimeUrl: HIFI_UPTIME_URL,
       hifiUptimeLastUpdated: hifiApiState.lastUpdated,
       hifiApiLastError: hifiApiState.lastError || undefined,
+      qobuzFallbackEnabled: QOBUZ_FALLBACK_ENABLED,
+      qobuzApiCount: QOBUZ_API_BASES.length,
+      qobuzApis: QOBUZ_API_BASES,
       users: db.users.size
     });
   }
