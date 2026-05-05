@@ -650,6 +650,25 @@ const HIFI_APIS = {
     'https://frankfurt-1.monochrome.tf',
     'https://eu-central.monochrome.tf',
     'https://us-west.monochrome.tf',
+    'https://1.frankfurt.monochrome.tf',
+    'https://1.oregon.monochrome.tf',
+    'https://2.frankfurt.monochrome.tf',
+    'https://2.oregon.monochrome.tf',
+    'https://3.frankfurt.monochrome.tf',
+    'https://3.oregon.monochrome.tf',
+    'https://4.frankfurt.monochrome.tf',
+    'https://4.oregon.monochrome.tf',
+    'https://5.frankfurt.monochrome.tf',
+    'https://5.oregon.monochrome.tf',
+    'https://6.frankfurt.monochrome.tf',
+    'https://6.oregon.monochrome.tf',
+    'https://7.frankfurt.monochrome.tf',
+    'https://7.oregon.monochrome.tf',
+    'https://8.oregon.monochrome.tf',
+    'https://9.frankfurt.monochrome.tf',
+    'https://9.oregon.monochrome.tf',
+    'https://10.frankfurt.monochrome.tf',
+    'https://10.oregon.monochrome.tf',
     'https://arran.monochrome.tf',
     'https://api.monochrome.tf',
     'https://monochrome-api.samidy.com'
@@ -686,13 +705,23 @@ const HIFI_UPTIME_TTL_MS = Number.isFinite(parsedHifiUptimeTtl) && parsedHifiUpt
   ? parsedHifiUptimeTtl
   : 60 * 1000;
 const HIFI_UPTIME_TIMEOUT_MS = 5000;
+const parsedHifiHealthTtl = Number(process.env.HIFI_HEALTH_TTL_MS);
+const HIFI_HEALTH_TTL_MS = Number.isFinite(parsedHifiHealthTtl) && parsedHifiHealthTtl >= 0
+  ? parsedHifiHealthTtl
+  : 60 * 1000;
+const HIFI_HEALTH_TIMEOUT_MS = 3000;
 const hifiApiState = {
   apis: [],
   apiType: null,
   fetchedAt: 0,
-  source: 'local-fallback',
+  source: 'local',
   lastUpdated: null,
   lastError: null,
+  inFlight: null
+};
+const hifiHealthState = {
+  activeApis: [],
+  checkedAt: 0,
   inFlight: null
 };
 
@@ -741,13 +770,14 @@ async function fetchHifiUptimeApis() {
   };
 }
 
-async function getAvailableHifiApis() {
+async function getUptimeHifiApis() {
   const now = Date.now();
   const cacheIsFresh = hifiApiState.apis.length > 0
+    && hifiApiState.apiType === 'uptime'
     && (HIFI_UPTIME_TTL_MS === 0 ? false : now - hifiApiState.fetchedAt < HIFI_UPTIME_TTL_MS);
 
   if (cacheIsFresh) {
-    hifiApiState.source = hifiApiState.apiType === 'uptime' ? 'cache' : 'local-fallback';
+    hifiApiState.source = 'uptime-cache';
     return hifiApiState.apis;
   }
 
@@ -765,15 +795,11 @@ async function getAvailableHifiApis() {
       .catch((err) => {
         hifiApiState.lastError = err?.message || String(err);
         if (hifiApiState.apis.length > 0 && hifiApiState.apiType === 'uptime') {
-          hifiApiState.source = 'cache';
+          hifiApiState.source = 'uptime-cache';
           return hifiApiState.apis;
         }
-        const fallbackApis = getLocalHifiApis();
-        hifiApiState.apis = fallbackApis;
-        hifiApiState.apiType = 'local-fallback';
-        hifiApiState.fetchedAt = Date.now();
-        hifiApiState.source = 'local-fallback';
-        return fallbackApis;
+        hifiApiState.source = 'local';
+        return [];
       })
       .finally(() => {
         hifiApiState.inFlight = null;
@@ -783,8 +809,86 @@ async function getAvailableHifiApis() {
   return hifiApiState.inFlight;
 }
 
+async function getHifiApiFallbackGroups() {
+  const localApis = getLocalHifiApis();
+  const localSet = new Set(localApis);
+  const uptimeApis = (await getUptimeHifiApis()).filter(api => !localSet.has(api));
+  const groups = [];
+  if (localApis.length > 0) groups.push({ source: 'local', apis: localApis });
+  if (uptimeApis.length > 0) groups.push({ source: 'uptime', apis: uptimeApis });
+  return groups;
+}
+
+async function getAvailableHifiApis() {
+  const groups = await getHifiApiFallbackGroups();
+  const apis = dedupeHifiApis(groups.flatMap(group => group.apis));
+  hifiApiState.source = groups.some(group => group.source === 'uptime')
+    ? 'local-first+uptime-fallback'
+    : 'local-first';
+  return apis;
+}
+
+async function checkHifiApiStatus(api, source) {
+  try {
+    const response = await axiosFast.get(api, {
+      timeout: HIFI_HEALTH_TIMEOUT_MS,
+      validateStatus: () => true
+    });
+    const version = String(response?.data?.version || '').trim();
+    const active = response.status >= 200 && response.status < 300 && /^2\./.test(version);
+    if (!active) return null;
+    return {
+      api,
+      url: api,
+      source,
+      status: response.status,
+      ok: true,
+      version,
+      message: `${api} ${response.status} (OK)`
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getActiveHifiApiStatuses() {
+  const now = Date.now();
+  const cacheIsFresh = hifiHealthState.activeApis.length > 0
+    && (HIFI_HEALTH_TTL_MS === 0 ? false : now - hifiHealthState.checkedAt < HIFI_HEALTH_TTL_MS);
+
+  if (cacheIsFresh) {
+    return hifiHealthState.activeApis;
+  }
+
+  if (!hifiHealthState.inFlight) {
+    hifiHealthState.inFlight = getHifiApiFallbackGroups()
+      .then(async (groups) => {
+        const seen = new Set();
+        const checks = groups.flatMap(group => group.apis
+          .filter((api) => {
+            if (seen.has(api)) return false;
+            seen.add(api);
+            return true;
+          })
+          .map(api => checkHifiApiStatus(api, group.source))
+        );
+        const activeApis = (await Promise.all(checks)).filter(Boolean);
+        hifiHealthState.activeApis = activeApis;
+        hifiHealthState.checkedAt = Date.now();
+        return activeApis;
+      })
+      .catch(() => hifiHealthState.activeApis)
+      .finally(() => {
+        hifiHealthState.inFlight = null;
+      });
+  }
+
+  return hifiHealthState.inFlight;
+}
+
 async function getRandomAPI() {
-  const allAPIs = await getAvailableHifiApis();
+  const localAPIs = getLocalHifiApis();
+  const allAPIs = localAPIs.length > 0 ? localAPIs : await getUptimeHifiApis();
 
   if (allAPIs.length === 0) {
     console.error("No hay APIs HiFi disponibles");
@@ -2210,17 +2314,10 @@ async function resolveTrackForDownload(id, qRaw) {
     "LOW": ["LOW", "HIGH", "LOSSLESS"]
   };
   const qualitiesToTry = qualityFallback[requestedQuality] || [requestedQuality];
-  const allAPIs = await getAvailableHifiApis();
-  const shuffledAPIs = shuffleArray(allAPIs);
-  const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
-
   let success = null;
   let usedQuality = null;
   for (const quality of qualitiesToTry) {
-    success = await fetchFirstTrackData({ apis: fastAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-    if (!success) {
-      success = await fetchFirstTrackData({ apis: allAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-    }
+    success = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
     if (!success) {
       success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
     }
@@ -2324,6 +2421,20 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
   } catch {
     return null;
   }
+}
+
+async function fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs = TRACK_TIMEOUT_MS }) {
+  const groups = await getHifiApiFallbackGroups();
+  for (const group of groups) {
+    const shuffledAPIs = shuffleArray(group.apis);
+    const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
+    let success = await fetchFirstTrackData({ apis: fastAPIs, id, quality, timeoutMs });
+    if (!success && group.apis.length > fastAPIs.length) {
+      success = await fetchFirstTrackData({ apis: group.apis, id, quality, timeoutMs });
+    }
+    if (success) return success;
+  }
+  return null;
 }
 
 function dedupeStrings(values) {
@@ -2560,6 +2671,36 @@ async function fetchFirstVideoData({ apis, id, quality = 'HIGH', timeoutMs = 450
   } catch {
     return null;
   }
+}
+
+async function fetchFirstVideoFromHifiFallbacks({ id, quality = 'HIGH', timeoutMs = TRACK_TIMEOUT_MS, mode = 'STREAM', presentation = 'FULL' }) {
+  const groups = await getHifiApiFallbackGroups();
+  for (const group of groups) {
+    const shuffledAPIs = shuffleArray(group.apis);
+    const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
+    let success = await fetchFirstVideoData({
+      apis: fastAPIs,
+      id,
+      quality,
+      timeoutMs,
+      mode,
+      presentation
+    });
+
+    if (!success && group.apis.length > fastAPIs.length) {
+      success = await fetchFirstVideoData({
+        apis: group.apis,
+        id,
+        quality,
+        timeoutMs,
+        mode,
+        presentation
+      });
+    }
+
+    if (success) return success;
+  }
+  return null;
 }
 
 
@@ -3054,11 +3195,6 @@ app.get('/api/track/:id', async (req, res) => {
 
     const qualitiesToTry = qualityFallback[requestedQuality] || [requestedQuality];
 
-    // Todas las APIs
-    const allAPIs = await getAvailableHifiApis();
-    const shuffledAPIs = shuffleArray(allAPIs);
-    const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
-
     // Intentar cada calidad en orden de fallback
     let success = null;
     let usedQuality = null;
@@ -3066,10 +3202,7 @@ app.get('/api/track/:id', async (req, res) => {
     for (const quality of qualitiesToTry) {
       console.log(`   -> Intentando calidad: ${quality}`);
 
-      success = await fetchFirstTrackData({ apis: fastAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-      if (!success) {
-        success = await fetchFirstTrackData({ apis: allAPIs, id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-      }
+      success = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
       if (!success) {
         success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
       }
@@ -3197,29 +3330,13 @@ app.get('/api/video/:id', async (req, res) => {
       return res.json(cached);
     }
 
-    const allAPIs = await getAvailableHifiApis();
-    const shuffledAPIs = shuffleArray(allAPIs);
-    const fastAPIs = shuffledAPIs.slice(0, FAST_TRACK_POOL);
-
-    let success = await fetchFirstVideoData({
-      apis: fastAPIs,
+    const success = await fetchFirstVideoFromHifiFallbacks({
       id,
       quality: requestedQuality,
       timeoutMs: TRACK_TIMEOUT_MS,
       mode,
       presentation
     });
-
-    if (!success) {
-      success = await fetchFirstVideoData({
-        apis: allAPIs,
-        id,
-        quality: requestedQuality,
-        timeoutMs: TRACK_TIMEOUT_MS,
-        mode,
-        presentation
-      });
-    }
 
     if (!success) {
       return res.status(500).json({ error: 'No se pudo obtener el video' });
@@ -4876,7 +4993,12 @@ app.get('/api/user/stats', authMiddleware, (req, res) => {
 
 app.get('/health', async (req, res) => {
   try {
-    const hifiApis = await getAvailableHifiApis();
+    const hifiGroups = await getHifiApiFallbackGroups();
+    const hifiApis = dedupeHifiApis(hifiGroups.flatMap(group => group.apis));
+    const localHifiCount = hifiGroups.find(group => group.source === 'local')?.apis.length || 0;
+    const uptimeHifiCount = hifiGroups.find(group => group.source === 'uptime')?.apis.length || 0;
+    const hifiActiveApis = await getActiveHifiApiStatuses();
+    hifiApiState.source = uptimeHifiCount > 0 ? 'local-first+uptime-fallback' : 'local-first';
     let usersCount = db.users.size;
     if (pool) {
       const result = await pool.query('SELECT COUNT(*) FROM users');
@@ -4889,6 +5011,10 @@ app.get('/health', async (req, res) => {
       apis: Object.keys(HIFI_APIS),
       hifiApiSource: hifiApiState.source,
       hifiApiCount: hifiApis.length,
+      hifiLocalApiCount: localHifiCount,
+      hifiUptimeApiCount: uptimeHifiCount,
+      hifiActiveApiCount: hifiActiveApis.length,
+      hifiActiveApis,
       hifiUptimeUrl: HIFI_UPTIME_URL,
       hifiUptimeLastUpdated: hifiApiState.lastUpdated,
       hifiApiLastError: hifiApiState.lastError || undefined,
@@ -4898,13 +5024,23 @@ app.get('/health', async (req, res) => {
       users: usersCount
     });
   } catch (error) {
-    const hifiApis = hifiApiState.apis.length > 0 ? hifiApiState.apis : getLocalHifiApis();
+    const localHifiApis = getLocalHifiApis();
+    const uptimeHifiApis = hifiApiState.apiType === 'uptime' ? hifiApiState.apis : [];
+    const hifiApis = hifiApiState.apis.length > 0
+      ? dedupeHifiApis([...localHifiApis, ...uptimeHifiApis])
+      : localHifiApis;
+    const uptimeHifiCount = uptimeHifiApis.filter(api => !localHifiApis.includes(api)).length;
+    const hifiActiveApis = await getActiveHifiApiStatuses();
     res.json({ 
       status: 'ok', 
       timestamp: new Date().toISOString(),
       apis: Object.keys(HIFI_APIS),
-      hifiApiSource: hifiApiState.source,
+      hifiApiSource: uptimeHifiCount > 0 ? 'local-first+uptime-fallback' : 'local-first',
       hifiApiCount: hifiApis.length,
+      hifiLocalApiCount: localHifiApis.length,
+      hifiUptimeApiCount: uptimeHifiCount,
+      hifiActiveApiCount: hifiActiveApis.length,
+      hifiActiveApis,
       hifiUptimeUrl: HIFI_UPTIME_URL,
       hifiUptimeLastUpdated: hifiApiState.lastUpdated,
       hifiApiLastError: hifiApiState.lastError || undefined,
