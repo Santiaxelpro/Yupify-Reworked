@@ -84,7 +84,8 @@ if (USE_POSTGRES) {
 
   const needsSSL = process.env.PGSSL === 'true'
     || process.env.NODE_ENV === 'production'
-    || (process.env.DATABASE_URL || '').includes('render.com');
+    || (process.env.DATABASE_URL || '').includes('render.com')
+    || (process.env.DATABASE_URL || '').includes('supabase.co');
 
   if (needsSSL) {
     pgConfig.ssl = { rejectUnauthorized: false };
@@ -692,7 +693,7 @@ const HIFI_APIS = {
     'https://hifi-api4.spotisaver.net',
     'https://hifi-api5.spotisaver.net',
     'https://hifi-api6.spotisaver.net',
-    'https://hifi.geeked.wtf'
+    'https://hifi-2tzpyfhd.geeked.wtf'
   ],
   kinoplus: [
     'https://tidal.kinoplus.online/'
@@ -3127,55 +3128,61 @@ app.get('/api/track/:id', async (req, res) => {
       return normalized;
     };
 
-    const cached = getCache(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
+    const readCachedTrackPayload = async () => {
+      const cached = getCache(cacheKey);
+      if (cached) return cached;
 
-    if (AUDIO_CACHE_READ) {
-      const audioCached = await findCachedAudioFile({ id, requestedQuality });
-      if (audioCached?.file?.id) {
-        const audioUrl = `/api/audio/file/${audioCached.file.id}`;
-        let meta = null;
-        if (audioCached.file.name) {
-          meta = await loadAudioMetaFromGDrive(audioCached.file.name);
-        }
-        if (!meta && (nameHint?.title || nameHint?.track || nameHint?.artist || nameHint?.album)) {
-          const hintedTitle = (nameHint?.title || nameHint?.track || '').toString().trim();
-          const hintedArtist = (nameHint?.artist || '').toString().trim();
-          const hintedAlbum = (nameHint?.album || '').toString().trim();
-          meta = {
-            id,
-            title: hintedTitle || undefined,
-            artist: hintedArtist || undefined,
-            album: hintedAlbum ? { title: hintedAlbum } : undefined,
-            albumTitle: hintedAlbum || undefined
+      if (AUDIO_CACHE_READ) {
+        const audioCached = await findCachedAudioFile({ id, requestedQuality });
+        if (audioCached?.file?.id) {
+          const audioUrl = `/api/audio/file/${audioCached.file.id}`;
+          let meta = null;
+          if (audioCached.file.name) {
+            meta = await loadAudioMetaFromGDrive(audioCached.file.name);
+          }
+          if (!meta && (nameHint?.title || nameHint?.track || nameHint?.artist || nameHint?.album)) {
+            const hintedTitle = (nameHint?.title || nameHint?.track || '').toString().trim();
+            const hintedArtist = (nameHint?.artist || '').toString().trim();
+            const hintedAlbum = (nameHint?.album || '').toString().trim();
+            meta = {
+              id,
+              title: hintedTitle || undefined,
+              artist: hintedArtist || undefined,
+              album: hintedAlbum ? { title: hintedAlbum } : undefined,
+              albumTitle: hintedAlbum || undefined
+            };
+          }
+          const cachedQuality = normalizeQualityValue(meta?.usedQuality)
+            || normalizeQualityValue(audioCached.quality)
+            || normalizeQualityValue(meta?.audioQuality)
+            || requestedQuality;
+
+          const payload = {
+            ...(meta && typeof meta === 'object' ? meta : {}),
+            url: audioUrl,
+            assetPresentation: 'FULL',
+            manifestMimeType: audioCached.file.mimeType || meta?.manifestMimeType || null,
+            requestedQuality,
+            usedQuality: cachedQuality,
+            cached: true
           };
+          if (!payload.id) payload.id = id;
+          if (AUDIO_CACHE_DEBUG) {
+            console.log('[audio-cache] USE:', audioCached.file.name, 'id:', audioCached.file.id);
+          }
+          setCache(cacheKey, payload, CACHE_TTL.track);
+          return payload;
         }
-        const cachedQuality = normalizeQualityValue(meta?.usedQuality)
-          || normalizeQualityValue(audioCached.quality)
-          || normalizeQualityValue(meta?.audioQuality)
-          || requestedQuality;
-
-        const payload = {
-          ...(meta && typeof meta === 'object' ? meta : {}),
-          url: audioUrl,
-          assetPresentation: 'FULL',
-          manifestMimeType: audioCached.file.mimeType || meta?.manifestMimeType || null,
-          requestedQuality,
-          usedQuality: cachedQuality,
-          cached: true
-        };
-        if (!payload.id) payload.id = id;
-        if (AUDIO_CACHE_DEBUG) {
-          console.log('[audio-cache] USE:', audioCached.file.name, 'id:', audioCached.file.id);
-        }
-        setCache(cacheKey, payload, CACHE_TTL.track);
-        return res.json(payload);
       }
-    }
+
+      return null;
+    };
 
     if (ONLY_GOOGLE_DRIVE) {
+      const cachedPayload = await readCachedTrackPayload();
+      if (cachedPayload) {
+        return res.json(cachedPayload);
+      }
       return res.status(404).json({
         error: 'ONLY_GOOGLE_DRIVE enabled: audio cache miss',
         id,
@@ -3215,6 +3222,11 @@ app.get('/api/track/:id', async (req, res) => {
     }
 
     if (!success) {
+      const cachedPayload = await readCachedTrackPayload();
+      if (cachedPayload) {
+        return res.json(cachedPayload);
+      }
+
       return res.status(500).json({
         error: "No se pudo obtener el track en ninguna calidad",
         requestedQuality,
@@ -3325,10 +3337,6 @@ app.get('/api/video/:id', async (req, res) => {
     const mode = (req.query.mode || 'STREAM').toString().trim();
     const presentation = (req.query.presentation || 'FULL').toString().trim();
     const cacheKey = `video:${id}|q:${requestedQuality}|m:${mode}|p:${presentation}`;
-    const cached = getCache(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
 
     const success = await fetchFirstVideoFromHifiFallbacks({
       id,
@@ -3339,6 +3347,11 @@ app.get('/api/video/:id', async (req, res) => {
     });
 
     if (!success) {
+      const cached = getCache(cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
+
       return res.status(500).json({ error: 'No se pudo obtener el video' });
     }
 
