@@ -76,6 +76,64 @@ const getHeaders = (includeAuth = false) => {
   return headers;
 };
 
+const API_MEMORY_MAX = 120;
+const apiMemoryCache = new Map();
+const apiInFlight = new Map();
+
+const trimMemoryMap = (map, maxEntries = API_MEMORY_MAX) => {
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+    map.delete(oldestKey);
+  }
+};
+
+const getMemoryCached = (key) => {
+  const entry = apiMemoryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    apiMemoryCache.delete(key);
+    return null;
+  }
+  return entry.data;
+};
+
+const setMemoryCached = (key, data, ttl) => {
+  apiMemoryCache.set(key, { data, expiresAt: Date.now() + ttl });
+  trimMemoryMap(apiMemoryCache);
+};
+
+const requestJson = async (url, options = {}, settings = {}) => {
+  const method = String(options.method || 'GET').toUpperCase();
+  const ttl = Number(settings.ttl || 0);
+  const dedupe = settings.dedupe !== false;
+  const cacheable = method === 'GET' && ttl > 0;
+  const key = `${method}:${url}`;
+
+  if (cacheable) {
+    const cached = getMemoryCached(key);
+    if (cached) return cached;
+  }
+
+  if (dedupe && apiInFlight.has(key)) {
+    return apiInFlight.get(key);
+  }
+
+  const promise = fetch(url, options)
+    .then(handleResponse)
+    .then(data => {
+      if (cacheable) setMemoryCached(key, data, ttl);
+      return data;
+    })
+    .finally(() => apiInFlight.delete(key));
+
+  if (dedupe) {
+    apiInFlight.set(key, promise);
+    trimMemoryMap(apiInFlight);
+  }
+
+  return promise;
+};
+
 
 
 // ==================== AUTENTICACIÓN ====================
@@ -143,54 +201,29 @@ export const searchService = {
   // Buscar música (query general)
   search: async (query, limit = 20) => {
     const url = `${API_URL}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`;
-
-    const response = await fetch(url, {
-      headers: getHeaders(),
-    });
-
-    return handleResponse(response); // <-- ahora devuelve items, total, offset, raw
+    return requestJson(url, { headers: getHeaders() }, { ttl: 30_000 });
   },
 
   // Buscar por artista
   searchArtist: async (artist, limit = 20) => {
     const url = `${API_URL}/api/search?a=${encodeURIComponent(artist)}&limit=${limit}`;
-
-    const response = await fetch(url, {
-      headers: getHeaders(),
-    });
-
-    return handleResponse(response);
+    return requestJson(url, { headers: getHeaders() }, { ttl: 30_000 });
   },
 
   // Buscar por álbum
   searchAlbum: async (album, limit = 20) => {
     const url = `${API_URL}/api/search?al=${encodeURIComponent(album)}&limit=${limit}`;
-
-    const response = await fetch(url, {
-      headers: getHeaders(),
-    });
-
-    return handleResponse(response);
+    return requestJson(url, { headers: getHeaders() }, { ttl: 30_000 });
   },
 
   searchVideo: async (video, limit = 20) => {
     const url = `${API_URL}/api/search?v=${encodeURIComponent(video)}&limit=${limit}`;
-
-    const response = await fetch(url, {
-      headers: getHeaders(),
-    });
-
-    return handleResponse(response);
+    return requestJson(url, { headers: getHeaders() }, { ttl: 30_000 });
   },
 
   searchPlaylist: async (playlist, limit = 20) => {
     const url = `${API_URL}/api/search?p=${encodeURIComponent(playlist)}&limit=${limit}`;
-
-    const response = await fetch(url, {
-      headers: getHeaders(),
-    });
-
-    return handleResponse(response);
+    return requestJson(url, { headers: getHeaders() }, { ttl: 30_000 });
   }
 };
 
@@ -216,12 +249,11 @@ export const trackService = {
       if (coverUrl) params.set('coverUrl', coverUrl);
     }
 
-    const response = await fetch(
+    const data = await requestJson(
       `${API_URL}/api/track/${trackId}?${params.toString()}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 90_000 }
     );
-
-    const data = await handleResponse(response);
 
     // El backend devuelve un objeto con manifest (decodificado) y URLs
     // Extraer la URL de streaming del manifest
@@ -273,11 +305,11 @@ export const trackService = {
     if (options.sourcePrefer) params.set('sourcePrefer', options.sourcePrefer);
     if (options.sourceOnly) params.set('sourceOnly', options.sourceOnly);
     if (options.version) params.set('version', options.version);
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/lyrics?${params.toString()}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 5 * 60_000 }
     );
-    return handleResponse(response);
   },
 
   downloadTrack: async (track, quality = 'LOSSLESS') => {
@@ -323,12 +355,11 @@ export const videoService = {
       presentation: String(options.presentation || 'FULL')
     });
 
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/video/${videoId}?${params.toString()}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 60_000 }
     );
-
-    return handleResponse(response);
   }
 };
 
@@ -337,11 +368,11 @@ export const videoService = {
 export const albumService = {
   // Obtener álbum
   getAlbum: async (albumId) => {
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/album/${albumId}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 5 * 60_000 }
     );
-    return handleResponse(response);
   }
 };
 
@@ -351,9 +382,8 @@ export const artistService = {
     const url = full 
       ? `${API_URL}/api/artist/${artistId}?f=1`
       : `${API_URL}/api/artist/${artistId}`;
-    
-    const response = await fetch(url, { headers: getHeaders() });
-    return handleResponse(response);
+
+    return requestJson(url, { headers: getHeaders() }, { ttl: 5 * 60_000 });
   }
 };
 
@@ -362,20 +392,20 @@ export const artistService = {
 export const exploreService = {
   // Obtener trending
   getTrending: async (limit = 20, offset = 0) => {
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/trending?limit=${limit}&offset=${offset}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 2 * 60_000 }
     );
-    return handleResponse(response);
   },
 
   // Obtener mix
   getMix: async (mixId, country = 'US') => {
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/mix/${mixId}?country=${country}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 5 * 60_000 }
     );
-    return handleResponse(response);
   },
 
   // Obtener top videos
@@ -387,21 +417,21 @@ export const exploreService = {
       locale: String(options.locale || 'en_US'),
       deviceType: String(options.deviceType || 'BROWSER')
     });
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/topvideos?${params.toString()}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 2 * 60_000 }
     );
-    return handleResponse(response);
   },
 
   // Obtener portada
   getCover: async (id = null, query = null) => {
     const param = id ? `id=${id}` : `q=${encodeURIComponent(query)}`;
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/cover?${param}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 10 * 60_000 }
     );
-    return handleResponse(response);
   }
 };
 
@@ -414,11 +444,11 @@ export const recommendationsService = {
       limit: String(limit),
       offset: String(offset)
     });
-    const response = await fetch(
+    return requestJson(
       `${API_URL}/api/recommendations?${params.toString()}`,
-      { headers: getHeaders() }
+      { headers: getHeaders() },
+      { ttl: 60_000 }
     );
-    return handleResponse(response);
   }
 };
 

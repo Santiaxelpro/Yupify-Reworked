@@ -100,8 +100,49 @@ const CACHE_TTL = {
   track: 5 * 60 * 1000,
   lyrics: 10 * 60 * 1000
 };
+const MAX_MEMORY_CACHE_ENTRIES = Math.max(Number(process.env.MAX_MEMORY_CACHE_ENTRIES) || 500, 50);
+const GDRIVE_LOOKUP_TTL_MS = Math.max(Number(process.env.GDRIVE_LOOKUP_TTL_MS) || 2 * 60 * 1000, 10 * 1000);
+const GDRIVE_CONTENT_TTL_MS = Math.max(Number(process.env.GDRIVE_CONTENT_TTL_MS) || 5 * 60 * 1000, 30 * 1000);
 const cacheStore = new Map();
+const trackInFlight = new Map();
+const searchInFlight = new Map();
+const gdriveFileNameCache = new Map();
+const gdriveQueryCache = new Map();
+const gdriveDownloadCache = new Map();
 const tidalAuthState = { accessToken: null, expiresAt: 0 };
+
+const trimMap = (map, maxEntries = MAX_MEMORY_CACHE_ENTRIES) => {
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+    map.delete(oldestKey);
+  }
+};
+
+const getTtlMapValue = (map, key) => {
+  const entry = map.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    map.delete(key);
+    return undefined;
+  }
+  return entry.value;
+};
+
+const setTtlMapValue = (map, key, value, ttlMs, maxEntries = MAX_MEMORY_CACHE_ENTRIES) => {
+  map.set(key, { value, expiresAt: Date.now() + ttlMs });
+  trimMap(map, maxEntries);
+};
+
+const runSingleFlight = (map, key, fn) => {
+  const existing = map.get(key);
+  if (existing) return existing;
+  const promise = Promise.resolve()
+    .then(fn)
+    .finally(() => map.delete(key));
+  map.set(key, promise);
+  trimMap(map, MAX_MEMORY_CACHE_ENTRIES);
+  return promise;
+};
 
 const getCache = (key) => {
   const entry = cacheStore.get(key);
@@ -115,6 +156,7 @@ const getCache = (key) => {
 
 const setCache = (key, value, ttlMs) => {
   cacheStore.set(key, { value, expiresAt: Date.now() + ttlMs });
+  trimMap(cacheStore);
 };
 
 const hasOfficialTidalSearchConfig = () => (
@@ -250,23 +292,37 @@ function buildLyricsCacheFileName(cacheKey) {
 }
 
 async function findGDriveFileByName(fileName, folderId) {
+  const cacheKey = `${folderId}:${fileName}`;
+  const cached = getTtlMapValue(gdriveFileNameCache, cacheKey);
+  if (cached !== undefined) return cached;
+
   const q = `name = '${fileName}' and '${folderId}' in parents and trashed = false`;
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`;
   const resp = await gdriveRequest('GET', url, null);
   const files = resp.data?.files || [];
-  return files[0] || null;
+  const file = files[0] || null;
+  setTtlMapValue(gdriveFileNameCache, cacheKey, file, GDRIVE_LOOKUP_TTL_MS);
+  return file;
 }
 
 async function findGDriveFileByQuery(query) {
+  const cached = getTtlMapValue(gdriveQueryCache, query);
+  if (cached !== undefined) return cached;
+
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,size)&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=5`;
   const resp = await gdriveRequest('GET', url, null);
   const files = resp.data?.files || [];
+  setTtlMapValue(gdriveQueryCache, query, files, Math.min(GDRIVE_LOOKUP_TTL_MS, 30 * 1000));
   return files;
 }
 
 async function downloadGDriveFile(fileId) {
+  const cached = getTtlMapValue(gdriveDownloadCache, fileId);
+  if (cached !== undefined) return cached;
+
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
   const resp = await gdriveRequest('GET', url, null, { 'Accept': 'application/json' });
+  setTtlMapValue(gdriveDownloadCache, fileId, resp.data, GDRIVE_CONTENT_TTL_MS);
   return resp.data;
 }
 
@@ -291,7 +347,12 @@ async function createGDriveFile(fileName, folderId, mimeType = '') {
   const metadata = { name: fileName, parents: [folderId] };
   if (mimeType) metadata.mimeType = mimeType;
   const resp = await gdriveRequest('POST', url, metadata, { 'Content-Type': 'application/json' });
-  return resp.data?.id;
+  const fileId = resp.data?.id;
+  if (fileId) {
+    setTtlMapValue(gdriveFileNameCache, `${folderId}:${fileName}`, { id: fileId, name: fileName, mimeType }, GDRIVE_LOOKUP_TTL_MS);
+    gdriveQueryCache.clear();
+  }
+  return fileId;
 }
 
 async function updateGDriveFile(fileId, content, contentType = 'application/json') {
@@ -303,6 +364,7 @@ async function updateGDriveFile(fileId, content, contentType = 'application/json
     { 'Content-Type': contentType },
     { maxBodyLength: Infinity, maxContentLength: Infinity }
   );
+  gdriveDownloadCache.delete(fileId);
 }
 
 async function _loadLyricsCacheFromGDrive(cacheKey, sources) {
@@ -550,8 +612,20 @@ async function updateSongListEntry(entry) {
 }
 const _FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
+const parsedSearchApiPool = Number(process.env.SEARCH_API_POOL);
+const SEARCH_API_POOL = Number.isFinite(parsedSearchApiPool) && parsedSearchApiPool > 0
+  ? parsedSearchApiPool
+  : 6;
+const EXHAUSTIVE_SEARCH = process.env.EXHAUSTIVE_SEARCH === 'true';
 const SEARCH_TIMEOUT_MS = 4500;
-const TRACK_TIMEOUT_MS = 4500;
+const parsedTrackTimeoutMs = Number(process.env.TRACK_TIMEOUT_MS);
+const TRACK_TIMEOUT_MS = Number.isFinite(parsedTrackTimeoutMs) && parsedTrackTimeoutMs > 0
+  ? parsedTrackTimeoutMs
+  : 4500;
+const parsedTrackFallbackTimeoutMs = Number(process.env.TRACK_FALLBACK_TIMEOUT_MS);
+const TRACK_FALLBACK_TIMEOUT_MS = Number.isFinite(parsedTrackFallbackTimeoutMs) && parsedTrackFallbackTimeoutMs > 0
+  ? parsedTrackFallbackTimeoutMs
+  : Math.min(TRACK_TIMEOUT_MS, 2500);
 const QOBUZ_FALLBACK_ENABLED = process.env.QOBUZ_FALLBACK_ENABLED !== 'false';
 const DEFAULT_QOBUZ_API_BASES = ['https://qobuz.kennyy.com.br', 'https://qbz.spotisaver.net', 'https://qobuz.squid.wtf'];
 const QOBUZ_API_BASES = dedupeStrings(
@@ -561,6 +635,14 @@ const QOBUZ_API_BASES = dedupeStrings(
     .map(normalizeQobuzApiBase)
     .filter(Boolean)
 );
+const parsedQobuzSearchTimeoutMs = Number(process.env.QOBUZ_SEARCH_TIMEOUT_MS);
+const QOBUZ_SEARCH_TIMEOUT_MS = Number.isFinite(parsedQobuzSearchTimeoutMs) && parsedQobuzSearchTimeoutMs > 0
+  ? parsedQobuzSearchTimeoutMs
+  : 5000;
+const parsedQobuzDownloadTimeoutMs = Number(process.env.QOBUZ_DOWNLOAD_TIMEOUT_MS);
+const QOBUZ_DOWNLOAD_TIMEOUT_MS = Number.isFinite(parsedQobuzDownloadTimeoutMs) && parsedQobuzDownloadTimeoutMs > 0
+  ? parsedQobuzDownloadTimeoutMs
+  : 7000;
 
 
 // Cache simple en memoria para trending
@@ -811,24 +893,42 @@ async function getUptimeHifiApis() {
   return hifiApiState.inFlight;
 }
 
-async function getHifiApiFallbackGroups() {
+async function getHifiApiFallbackGroups(options = {}) {
   const localApis = getLocalHifiApis();
   const localSet = new Set(localApis);
-  const uptimeApis = (await getUptimeHifiApis()).filter(api => !localSet.has(api));
+  const waitForUptime = options?.waitForUptime !== false;
+  let uptimeApis = [];
+  if (waitForUptime) {
+    uptimeApis = (await getUptimeHifiApis()).filter(api => !localSet.has(api));
+  } else {
+    uptimeApis = hifiApiState.apiType === 'uptime'
+      ? hifiApiState.apis.filter(api => !localSet.has(api))
+      : [];
+    getUptimeHifiApis().catch(() => []);
+  }
   const groups = [];
   if (localApis.length > 0) groups.push({ source: 'local', apis: localApis });
   if (uptimeApis.length > 0) groups.push({ source: 'uptime', apis: uptimeApis });
   return groups;
 }
 
-async function getAvailableHifiApis() {
-  const groups = await getHifiApiFallbackGroups();
-  await getActiveHifiApiStatuses();
+async function getAvailableHifiApis(options = {}) {
+  const groups = await getHifiApiFallbackGroups({ waitForUptime: options?.waitForUptime });
+  if (options?.waitForHealth === false) {
+    getActiveHifiApiStatuses().catch(() => []);
+  } else {
+    await getActiveHifiApiStatuses();
+  }
   const apis = dedupeHifiApis(groups.flatMap(group => orderHifiApisByLatency(group.apis)));
   hifiApiState.source = groups.some(group => group.source === 'uptime')
     ? 'local-first+uptime-fallback'
     : 'local-first';
   return apis;
+}
+
+async function getSearchHifiApis() {
+  const apis = await getAvailableHifiApis({ waitForUptime: false, waitForHealth: false });
+  return EXHAUSTIVE_SEARCH ? apis : apis.slice(0, SEARCH_API_POOL);
 }
 
 function getHifiLatencyWeight(responseTimeMs) {
@@ -881,9 +981,13 @@ function orderHifiApisByLatency(apis) {
     .map(entry => entry.api);
 }
 
-async function getLatencyRankedHifiApiFallbackGroups() {
-  const groups = await getHifiApiFallbackGroups();
-  await getActiveHifiApiStatuses();
+async function getLatencyRankedHifiApiFallbackGroups(options = {}) {
+  const groups = await getHifiApiFallbackGroups({ waitForUptime: options?.waitForUptime });
+  if (options?.waitForHealth === false) {
+    getActiveHifiApiStatuses().catch(() => []);
+  } else {
+    await getActiveHifiApiStatuses();
+  }
   return groups
     .map(group => ({ ...group, apis: orderHifiApisByLatency(group.apis) }))
     .filter(group => group.apis.length > 0);
@@ -1013,9 +1117,9 @@ async function searchAnyAPI(query, limit = 1) {
     return Array.isArray(items) ? items : [];
   }
 
-  const allAPIs = await getAvailableHifiApis();
+  const allAPIs = await getSearchHifiApis();
   const requests = allAPIs.map(api =>
-    axios.get(`${api}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`, { timeout: 10000 })
+    axiosFast.get(`${api}/search/?s=${encodeURIComponent(query)}&li=${limit}&offset=0`, { timeout: SEARCH_TIMEOUT_MS })
       .then(r => ({ ok: true, data: r.data }))
       .catch(() => ({ ok: false }))
   );
@@ -1553,7 +1657,7 @@ async function runLegacySearchQuery({ searchQuery, rawQuery, kind, limit, offset
     };
   }
 
-  const allAPIs = await getAvailableHifiApis();
+  const allAPIs = await getSearchHifiApis();
   const requests = allAPIs.map(api =>
     axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
       .then(r => ({ ok: true, data: r.data }))
@@ -1607,23 +1711,33 @@ async function buildLegacyGlobalSearchPayload(rawQuery, limit, offset) {
 }
 
 async function fetchRecommendationsFromAPIs(params) {
-  const allAPIs = await getAvailableHifiApis();
-  const requests = allAPIs.map(api =>
-    axios.get(`${api}/recommendations/?${params}`, { timeout: 10000 })
-      .then(r => ({ ok: true, api, data: r.data }))
-      .catch(e => ({ ok: false, api, error: e.message }))
+  const allAPIs = await getAvailableHifiApis({ waitForUptime: false, waitForHealth: false });
+  const apis = EXHAUSTIVE_SEARCH ? allAPIs : allAPIs.slice(0, SEARCH_API_POOL);
+  const requests = apis.map(api =>
+    axiosFast.get(`${api}/recommendations/?${params}`, { timeout: SEARCH_TIMEOUT_MS })
+      .then(r => {
+        const data = r.data;
+        const items = data?.data?.items ?? data?.items ?? data?.data;
+        if (!Array.isArray(items) || items.length === 0) {
+          throw new Error('Empty recommendations');
+        }
+        return data;
+      })
   );
 
-  const responses = await Promise.all(requests);
-  const success = responses.find(r => {
-    if (!r.ok || !r.data) return false;
-    const items = r.data?.data?.items ?? r.data?.items ?? r.data?.data;
-    return Array.isArray(items) && items.length > 0;
-  });
-  if (success) return success.data;
-
-  const fallback = responses.find(r => r.ok && r.data);
-  return fallback ? fallback.data : null;
+  try {
+    return await Promise.any(requests);
+  } catch {
+    const fallbackRequests = allAPIs
+      .slice(apis.length, apis.length + SEARCH_API_POOL)
+      .map(api => axiosFast.get(`${api}/recommendations/?${params}`, { timeout: SEARCH_TIMEOUT_MS }).then(r => r.data));
+    if (fallbackRequests.length === 0) return null;
+    try {
+      return await Promise.any(fallbackRequests);
+    } catch {
+      return null;
+    }
+  }
 }
 
 function isAllowedVideoProxyUrl(rawUrl) {
@@ -1874,6 +1988,20 @@ function buildAudioMetaFileName(audioFileName) {
   return `${base}.json`;
 }
 
+function normalizeQualityValue(value) {
+  if (!value) return null;
+  const raw = String(value).toUpperCase().trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/[\s-]+/g, '_').replace(/_+/g, '_');
+  const compact = normalized.replace(/_/g, '');
+  if (compact === 'HIRESLOSSLESS' || compact === 'HIRESLOSSLSS') return 'HI_RES_LOSSLESS';
+  if (compact === 'HIRES') return 'HI_RES';
+  if (compact === 'LOSSLESS' || compact === 'LOSSLSS') return 'LOSSLESS';
+  if (compact === 'HIGH') return 'HIGH';
+  if (compact === 'LOW') return 'LOW';
+  return normalized;
+}
+
 function buildAudioMetaPayload({ id, track, usedQuality, nameHint }) {
   if (!track && !id) return null;
   const meta = extractTrackMetadata(track || {}, nameHint || {});
@@ -1882,15 +2010,6 @@ function buildAudioMetaPayload({ id, track, usedQuality, nameHint }) {
     : (meta.albumTitle ? { title: meta.albumTitle } : undefined);
   const duration = track?.duration ?? track?.trackDuration ?? track?.length ?? null;
   const durationMs = track?.durationMs ?? track?.duration_ms ?? null;
-  const normalizeQualityValue = (value) => {
-    if (!value) return null;
-    const raw = String(value).toUpperCase().trim();
-    if (!raw) return null;
-    const normalized = raw.replace(/[\s-]+/g, '_');
-    if (normalized === 'HIRES_LOSSLESS') return 'HI_RES_LOSSLESS';
-    if (normalized === 'HIRES') return 'HI_RES';
-    return normalized;
-  };
 
   const audioQuality = normalizeQualityValue(track?.audioQuality || track?.quality || track?.streamQuality);
 
@@ -1977,16 +2096,81 @@ function getQualityFallbackList(requestedQuality) {
   const q = (requestedQuality || '').toUpperCase().trim();
   const qualityFallback = {
     "HI_RES_LOSSLESS": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
-    "LOSSLESS": ["LOSSLESS", "HI_RES_LOSSLESS", "HIGH", "LOW"],
-    "HIGH": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
-    "LOW": ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"]
+    "LOSSLESS": ["LOSSLESS", "HIGH", "LOW"],
+    "HIGH": ["HIGH", "LOW", "LOSSLESS"],
+    "LOW": ["LOW", "HIGH", "LOSSLESS"]
   };
-  return qualityFallback[q] || ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"];
+  return qualityFallback[q] || ["LOSSLESS", "HIGH", "LOW"];
 }
 
 function isLosslessQuality(quality) {
   const normalized = (quality || '').toString().toUpperCase().trim();
   return normalized === 'HI_RES_LOSSLESS' || normalized === 'LOSSLESS';
+}
+
+function getTrackAttemptTimeoutMs(quality, requestedQuality) {
+  return quality === requestedQuality ? TRACK_TIMEOUT_MS : TRACK_FALLBACK_TIMEOUT_MS;
+}
+
+function shouldTryQobuzForQuality(quality, requestedQuality) {
+  return isLosslessQuality(requestedQuality) && isLosslessQuality(quality);
+}
+
+async function fetchTrackFallbackData({ id, requestedQuality, log = null }) {
+  const qualitiesToTry = getQualityFallbackList(requestedQuality);
+
+  for (const quality of qualitiesToTry) {
+    const attemptTimeoutMs = getTrackAttemptTimeoutMs(quality, requestedQuality);
+    const fallbackLabel = quality === requestedQuality ? '' : ' fallback';
+    log?.(`   -> HiFi${fallbackLabel} calidad: ${quality} (${attemptTimeoutMs}ms)`);
+
+    const hifiSuccess = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: attemptTimeoutMs });
+    if (hifiSuccess) {
+      return {
+        success: hifiSuccess,
+        usedQuality: normalizeQualityValue(hifiSuccess.data?.usedQuality) || quality,
+        matchedQuality: quality,
+        attemptedQualities: qualitiesToTry
+      };
+    }
+
+    if (shouldTryQobuzForQuality(quality, requestedQuality)) {
+      log?.(`   -> Qobuz fallback calidad: ${quality} (${attemptTimeoutMs}ms)`);
+      const qobuzSuccess = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs });
+      if (qobuzSuccess) {
+        return {
+          success: qobuzSuccess,
+          usedQuality: normalizeQualityValue(qobuzSuccess.data?.usedQuality) || quality,
+          matchedQuality: quality,
+          attemptedQualities: qualitiesToTry
+        };
+      }
+    }
+  }
+
+  const qobuzFallbackQualities = isLosslessQuality(requestedQuality)
+    ? qualitiesToTry.filter(quality => !isLosslessQuality(quality))
+    : qualitiesToTry;
+  for (const quality of qobuzFallbackQualities) {
+    const attemptTimeoutMs = getTrackAttemptTimeoutMs(quality, requestedQuality);
+    log?.(`   -> Qobuz fallback calidad: ${quality} (${attemptTimeoutMs}ms)`);
+    const qobuzSuccess = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs });
+    if (qobuzSuccess) {
+      return {
+        success: qobuzSuccess,
+        usedQuality: normalizeQualityValue(qobuzSuccess.data?.usedQuality) || quality,
+        matchedQuality: quality,
+        attemptedQualities: qualitiesToTry
+      };
+    }
+  }
+
+  return {
+    success: null,
+    usedQuality: null,
+    matchedQuality: null,
+    attemptedQualities: qualitiesToTry
+  };
 }
 
 async function findCachedAudioFile({ id, requestedQuality }) {
@@ -2403,50 +2587,9 @@ function tryDecodeManifest(m) {
 async function resolveTrackForDownload(id, qRaw) {
   const VALID_QUALITIES = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"];
   const requestedQuality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
-  const qualitiesToTry = getQualityFallbackList(requestedQuality);
-  let success = null;
-  let usedQuality = null;
-
-  const losslessQualities = qualitiesToTry.filter(isLosslessQuality);
-  const lossyQualities = qualitiesToTry.filter(quality => !isLosslessQuality(quality));
-
-  for (const quality of losslessQualities) {
-    success = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-    if (success) {
-      usedQuality = success.data?.usedQuality || quality;
-      break;
-    }
-  }
-
-  if (!success) {
-    for (const quality of losslessQualities) {
-      success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-      if (success) {
-        usedQuality = success.data?.usedQuality || quality;
-        break;
-      }
-    }
-  }
-
-  if (!success) {
-    for (const quality of lossyQualities) {
-      success = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-      if (success) {
-        usedQuality = success.data?.usedQuality || quality;
-        break;
-      }
-    }
-  }
-
-  if (!success) {
-    for (const quality of lossyQualities) {
-      success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-      if (success) {
-        usedQuality = success.data?.usedQuality || quality;
-        break;
-      }
-    }
-  }
+  const fallback = await fetchTrackFallbackData({ id, requestedQuality });
+  const success = fallback.success;
+  let usedQuality = fallback.usedQuality;
 
   if (!success) {
     return { error: "No se pudo obtener el track en ninguna calidad" };
@@ -2464,10 +2607,17 @@ async function resolveTrackForDownload(id, qRaw) {
     respData.url = streamUrl;
   }
 
+  const reportedQuality = normalizeQualityValue(respData?.audioQuality || respData?.quality || respData?.streamQuality);
+  if (isDashMime(respData?.manifestMimeType)) {
+    usedQuality = isLosslessQuality(reportedQuality) ? reportedQuality : "HI_RES_LOSSLESS";
+  } else if (reportedQuality && VALID_QUALITIES.includes(reportedQuality)) {
+    usedQuality = reportedQuality;
+  }
+
   return {
     respData,
     streamUrl,
-    usedQuality,
+    usedQuality: normalizeQualityValue(usedQuality) || requestedQuality,
     requestedQuality
   };
 }
@@ -2526,7 +2676,7 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
 
   const requests = apis.map(api => {
     const cleanApi = api.replace(/\/+$/, "");
-    const url = `${cleanApi}/track/?id=${id}&quality=${quality}`;
+    const url = `${cleanApi}/trackManifests/?id=${encodeURIComponent(id)}&quality=${encodeURIComponent(quality)}`;
     return axiosFast.get(url, { timeout: timeoutMs })
       .then(r => {
         const payload = extractTrackPayload(r.data);
@@ -2545,7 +2695,10 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
 }
 
 async function fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs = TRACK_TIMEOUT_MS }) {
-  const groups = await getLatencyRankedHifiApiFallbackGroups();
+  const groups = await getLatencyRankedHifiApiFallbackGroups({
+    waitForUptime: false,
+    waitForHealth: false
+  });
   for (const group of groups) {
     const fastAPIs = group.apis.slice(0, FAST_TRACK_POOL);
     let success = await fetchFirstTrackData({ apis: fastAPIs, id, quality, timeoutMs });
@@ -2688,21 +2841,25 @@ async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIME
     const isrc = (tidalTrack?.isrc || '').toString().trim();
     if (!isrc) return null;
 
-    for (const qobuzApiBase of QOBUZ_API_BASES) {
+    const searchTimeoutMs = Math.min(Math.max(timeoutMs, 3000), QOBUZ_SEARCH_TIMEOUT_MS);
+    const downloadTimeoutMs = Math.min(Math.max(timeoutMs, 4000), QOBUZ_DOWNLOAD_TIMEOUT_MS);
+    const controller = new AbortController();
+    let settled = false;
+    const requests = QOBUZ_API_BASES.map(async (qobuzApiBase) => {
       try {
         const searchUrl = `${qobuzApiBase}/api/get-music?q=${encodeURIComponent(isrc)}&offset=0`;
-        const searchResponse = await axiosFast.get(searchUrl, { timeout: Math.max(timeoutMs, 10000) });
+        const searchResponse = await axiosFast.get(searchUrl, { timeout: searchTimeoutMs, signal: controller.signal });
         const qobuzTrack = pickQobuzTrack(extractQobuzTrackItems(searchResponse.data), isrc);
         const qobuzTrackId = qobuzTrack?.id || qobuzTrack?.track_id || qobuzTrack?.trackId;
-        if (!qobuzTrackId) continue;
+        if (!qobuzTrackId) throw new Error('Qobuz track not found');
 
         const qobuzQuality = mapTidalQualityToQobuzQuality(quality);
         const downloadUrl = `${qobuzApiBase}/api/download-music?track_id=${encodeURIComponent(qobuzTrackId)}&quality=${encodeURIComponent(qobuzQuality)}`;
-        const downloadResponse = await axiosFast.get(downloadUrl, { timeout: Math.max(timeoutMs, 15000) });
+        const downloadResponse = await axiosFast.get(downloadUrl, { timeout: downloadTimeoutMs, signal: controller.signal });
         const streamUrl = getQobuzDownloadUrl(downloadResponse.data);
-        if (!streamUrl) continue;
+        if (!streamUrl) throw new Error('Qobuz download URL not found');
 
-        return {
+        const result = {
           ok: true,
           url: downloadUrl,
           data: {
@@ -2717,14 +2874,18 @@ async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIME
             qobuzApiBase
           }
         };
+        settled = true;
+        controller.abort();
+        return result;
       } catch (err) {
-        if (AUDIO_CACHE_DEBUG) {
+        if (AUDIO_CACHE_DEBUG && !settled && err?.code !== 'ERR_CANCELED') {
           console.warn('[qobuz-fallback] provider failed:', qobuzApiBase, err?.message || err);
         }
+        throw err;
       }
-    }
+    });
 
-    return null;
+    return await Promise.any(requests);
   } catch (err) {
     if (AUDIO_CACHE_DEBUG) {
       console.warn('[qobuz-fallback] failed:', err?.message || err);
@@ -3236,16 +3397,6 @@ app.get('/api/track/:id', async (req, res) => {
     const requestedQuality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
     const cacheKey = `track:${id}|q:${requestedQuality}`;
 
-    const normalizeQualityValue = (value) => {
-      if (!value) return null;
-      const raw = String(value).toUpperCase().trim();
-      if (!raw) return null;
-      const normalized = raw.replace(/[\s-]+/g, '_');
-      if (normalized === 'HIRES_LOSSLESS') return 'HI_RES_LOSSLESS';
-      if (normalized === 'HIRES') return 'HI_RES';
-      return normalized;
-    };
-
     const readCachedTrackPayload = async () => {
       const cached = getCache(cacheKey);
       if (cached) return cached;
@@ -3308,64 +3459,30 @@ app.get('/api/track/:id', async (req, res) => {
       });
     }
 
+    const pendingTrackPayload = trackInFlight.get(cacheKey);
+    if (pendingTrackPayload) {
+      console.log(`[track] JOIN in-flight: ${id} ${requestedQuality}`);
+      try {
+        const payload = await pendingTrackPayload;
+        return res.json(payload);
+      } catch (error) {
+        if (error?.payload && error?.status) {
+          return res.status(error.status).json(error.payload);
+        }
+        throw error;
+      }
+    }
+
+    const trackPayloadPromise = (async () => {
     console.log(`\n>>> Calidad solicitada: ${qRaw} → intentando: ${requestedQuality}`);
 
-    // Orden de fallback: si no encuentra la solicitada, intenta las siguientes
-    const qualitiesToTry = getQualityFallbackList(requestedQuality);
-
-    // Intentar cada calidad en orden de fallback
-    let success = null;
-    let usedQuality = null;
-    let matchedQuality = null;
-
-    const losslessQualities = qualitiesToTry.filter(isLosslessQuality);
-    const lossyQualities = qualitiesToTry.filter(quality => !isLosslessQuality(quality));
-
-    for (const quality of losslessQualities) {
-      console.log(`   -> HiFi calidad: ${quality}`);
-      success = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-      if (success) {
-        usedQuality = success.data?.usedQuality || quality;
-        matchedQuality = quality;
-        break;
-      }
-    }
-
-    if (!success) {
-      for (const quality of losslessQualities) {
-        console.log(`   -> Qobuz fallback calidad: ${quality}`);
-        success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-        if (success) {
-          usedQuality = success.data?.usedQuality || quality;
-          matchedQuality = quality;
-          break;
-        }
-      }
-    }
-
-    if (!success) {
-      for (const quality of lossyQualities) {
-        console.log(`   -> HiFi fallback calidad: ${quality}`);
-        success = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-        if (success) {
-          usedQuality = success.data?.usedQuality || quality;
-          matchedQuality = quality;
-          break;
-        }
-      }
-    }
-
-    if (!success) {
-      for (const quality of lossyQualities) {
-        console.log(`   -> Qobuz fallback calidad: ${quality}`);
-        success = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: TRACK_TIMEOUT_MS });
-        if (success) {
-          usedQuality = success.data?.usedQuality || quality;
-          matchedQuality = quality;
-          break;
-        }
-      }
-    }
+    const fallback = await fetchTrackFallbackData({
+      id,
+      requestedQuality,
+      log: (message) => console.log(message)
+    });
+    const { success, matchedQuality, attemptedQualities: qualitiesToTry } = fallback;
+    let { usedQuality } = fallback;
 
     if (success) {
       console.log(`OK Track encontrado en calidad: ${matchedQuality || usedQuality}`);
@@ -3374,15 +3491,18 @@ app.get('/api/track/:id', async (req, res) => {
     if (!success) {
       const cachedPayload = await readCachedTrackPayload();
       if (cachedPayload) {
-        return res.json(cachedPayload);
+        return cachedPayload;
       }
 
-      return res.status(500).json({
+      const error = new Error("No se pudo obtener el track en ninguna calidad");
+      error.status = 500;
+      error.payload = {
         error: "No se pudo obtener el track en ninguna calidad",
         requestedQuality,
         attemptedQualities: qualitiesToTry,
         attempedQualities: qualitiesToTry
-      });
+      };
+      throw error;
     }
 
     console.log(`✔️ Track OK desde: ${success.url} | Calidad: ${usedQuality}`);
@@ -3418,7 +3538,9 @@ app.get('/api/track/:id', async (req, res) => {
       }
 
       const reportedQuality = normalizeQualityValue(respData?.audioQuality || respData?.quality || respData?.streamQuality);
-      if (!isDashMime(respData?.manifestMimeType) && reportedQuality && VALID_QUALITIES.includes(reportedQuality)) {
+      if (isDashMime(respData?.manifestMimeType)) {
+        usedQuality = isLosslessQuality(reportedQuality) ? reportedQuality : "HI_RES_LOSSLESS";
+      } else if (reportedQuality && VALID_QUALITIES.includes(reportedQuality)) {
         usedQuality = reportedQuality;
       }
 
@@ -3432,7 +3554,7 @@ app.get('/api/track/:id', async (req, res) => {
         url: playbackUrl,
         directUrl: directStreamUrl,
         requestedQuality: requestedQuality,
-        usedQuality: usedQuality
+        usedQuality: normalizeQualityValue(usedQuality) || requestedQuality
       };
       setCache(cacheKey, payload, CACHE_TTL.track);
       const runAudioCache = async () => {
@@ -3472,7 +3594,21 @@ app.get('/api/track/:id', async (req, res) => {
       } else {
         runAudioCache().catch(err => console.warn('[audio-cache] background error:', err.message));
       }
+      return payload;
+    })();
+
+    trackInFlight.set(cacheKey, trackPayloadPromise);
+    try {
+      const payload = await trackPayloadPromise;
       return res.json(payload);
+    } catch (error) {
+      if (error?.payload && error?.status) {
+        return res.status(error.status).json(error.payload);
+      }
+      throw error;
+    } finally {
+      trackInFlight.delete(cacheKey);
+    }
 
   } catch (error) {
     console.error("❌ Error en TRACK:", error.message);
@@ -3835,22 +3971,23 @@ app.get('/api/search', async (req, res) => {
       }
     }
 
+    const payload = await runSingleFlight(searchInFlight, cacheKey, async () => {
     const gdriveCached = await loadSearchCacheFromGDrive(cacheKey);
     if (gdriveCached) {
       if (!(officialSearchConfig?.global && (!gdriveCached.sections || typeof gdriveCached.sections !== 'object'))) {
         const rankedGdrive = applySearchRanking(gdriveCached, rawQuery, searchKind);
         if (hasStrongSearchMatch(rankedGdrive?.data?.items, rawQuery, searchKind)) {
           setCache(cacheKey, rankedGdrive, CACHE_TTL.search);
-          return res.json(rankedGdrive);
+          return rankedGdrive;
         }
       }
     }
 
     if (ONLY_GOOGLE_DRIVE) {
-      return res.status(404).json({
-        error: 'ONLY_GOOGLE_DRIVE enabled: search cache miss',
-        cacheKey
-      });
+      const error = new Error('ONLY_GOOGLE_DRIVE enabled: search cache miss');
+      error.status = 404;
+      error.payload = { error: error.message, cacheKey };
+      throw error;
     }
 
     if (officialSearchConfig) {
@@ -3859,7 +3996,7 @@ app.get('/api/search', async (req, res) => {
         const rankedOfficial = applySearchRanking(officialPayload, rawQuery, searchKind);
         setCache(cacheKey, rankedOfficial, CACHE_TTL.search);
         saveSearchCacheToGDrive(cacheKey, rankedOfficial);
-        return res.json(rankedOfficial);
+        return rankedOfficial;
       } catch (err) {
         console.warn('[search] official TIDAL search failed, using fallback:', err.message);
       }
@@ -3869,15 +4006,21 @@ app.get('/api/search', async (req, res) => {
       const globalLegacyPayload = await buildLegacyGlobalSearchPayload(rawQuery, limit, offset);
       setCache(cacheKey, globalLegacyPayload, CACHE_TTL.search);
       saveSearchCacheToGDrive(cacheKey, globalLegacyPayload);
-      return res.json(globalLegacyPayload);
+      return globalLegacyPayload;
     }
 
-    const payload = await runLegacySearchQuery({ searchQuery, rawQuery, kind: searchKind, limit, offset });
-    const rankedPayload = applySearchRanking(payload, rawQuery, searchKind);
+    const legacyPayload = await runLegacySearchQuery({ searchQuery, rawQuery, kind: searchKind, limit, offset });
+    const rankedPayload = applySearchRanking(legacyPayload, rawQuery, searchKind);
     setCache(cacheKey, rankedPayload, CACHE_TTL.search);
     saveSearchCacheToGDrive(cacheKey, rankedPayload);
-    return res.json(rankedPayload);
+    return rankedPayload;
+    });
+
+    return res.json(payload);
   } catch (error) {
+    if (error?.payload && error?.status) {
+      return res.status(error.status).json(error.payload);
+    }
     console.error('Error en búsqueda (v2):', error?.message || error);
     return res.status(500).json({ error: 'Error al buscar', details: error?.message || String(error) });
   }
@@ -3986,7 +4129,7 @@ app.get('/api/search', async (req, res) => {
     }
 
     // Por defecto: consultar todas las APIs HiFi activas en paralelo
-    const allAPIs = await getAvailableHifiApis();
+    const allAPIs = await getSearchHifiApis();
 
     const requests = allAPIs.map(api =>
       axiosFast.get(`${api}/search/?${searchQuery}&li=${limit}&offset=${offset}`, { timeout: SEARCH_TIMEOUT_MS })
@@ -4440,23 +4583,28 @@ app.get('/api/lyrics', async (req, res) => {
     }
 
     if (trackId) {
-      const allLyricsApis = await getAvailableHifiApis();
+      const allLyricsApis = await getAvailableHifiApis({ waitForUptime: false, waitForHealth: false });
+      const lyricsApis = EXHAUSTIVE_SEARCH ? allLyricsApis : allLyricsApis.slice(0, SEARCH_API_POOL);
+      const controller = new AbortController();
       let idFallbackPayload = null;
 
-      for (const apiBase of allLyricsApis) {
+      const idFallbackRequests = lyricsApis.map(async (apiBase) => {
         const url = `${apiBase}/lyrics/?id=${encodeURIComponent(trackId)}`;
-        console.log('-> Lyrics ID API:', url);
-        try {
-          const response = await axiosFast.get(url, { timeout: 12000 });
-          const payload = parseLyricsPayload(response.data);
-          if (!hasLyrics(payload)) continue;
+        if (LYRICS_CACHE_DEBUG) console.log('-> Lyrics ID API:', url);
+        const response = await axiosFast.get(url, { timeout: SEARCH_TIMEOUT_MS, signal: controller.signal });
+        const payload = parseLyricsPayload(response.data);
+        if (!hasLyrics(payload)) throw new Error('Lyrics ID fallback empty');
 
-          const payloadSource = extractSourceFromPayload(payload);
-          idFallbackPayload = attachLyricsSource(payload, payloadSource || 'track-id');
-          break;
-        } catch (err) {
-          lastError = err;
-        }
+        const payloadSource = extractSourceFromPayload(payload);
+        const result = attachLyricsSource(payload, payloadSource || 'track-id');
+        controller.abort();
+        return result;
+      });
+
+      try {
+        idFallbackPayload = await Promise.any(idFallbackRequests);
+      } catch (err) {
+        lastError = err;
       }
 
       if (idFallbackPayload) {

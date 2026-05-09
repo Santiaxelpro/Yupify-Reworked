@@ -1,5 +1,5 @@
 // src/App.jsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Music, TrendingUp, Disc, Heart, Clock, Plus, Loader, Sparkles, Clapperboard, ArrowLeft, Flame, UserRound, Library } from 'lucide-react';
 
 // Hooks
@@ -23,9 +23,12 @@ import { setDiscordActivity, clearDiscordActivity, disconnectDiscordRpc, isTauri
 import { normalizeText, getTrackKey } from './utils/autoplay';
 
 const GUEST_HISTORY_KEY = 'yupify_guest_history';
+const LAST_PLAYBACK_KEY = 'yupify_last_playback';
 const MAX_HISTORY_ITEMS = 100;
 const SKIP_RATIO_THRESHOLD = 0.35;
 const SKIP_SECONDS_THRESHOLD = 30;
+const NEXT_PRELOAD_LIMIT = 2;
+const MAX_PRELOAD_CACHE_ITEMS = 6;
 
 const App = () => {
   // Audio hook
@@ -53,7 +56,8 @@ const App = () => {
     handleEnded,
     setIsRepeat,
     setIsShuffle,
-    setOnEndedCallback
+    setOnEndedCallback,
+    restoreTrackState
   } = useAudio();
 
   // Auth hook
@@ -111,6 +115,61 @@ const App = () => {
   const rpcTrackIdRef = useRef(null);
   const rpcPlayingRef = useRef(false);
   const lastNotifiedTrackIdRef = useRef(null);
+  const restoredPlaybackRef = useRef(false);
+  const urlSearchInitializedRef = useRef(false);
+  const preloadCacheRef = useRef(new Map());
+  const preloadAudioRef = useRef(new Map());
+  const preloadInFlightRef = useRef(new Set());
+
+  const getTrackId = (track) => track?.id ?? track?.trackId ?? null;
+
+  const buildPersistableTrack = (track) => {
+    if (!track) return null;
+    const safeTrack = { ...track };
+    delete safeTrack.url;
+    delete safeTrack.streamUrl;
+    delete safeTrack.directUrl;
+    delete safeTrack.manifest;
+    delete safeTrack.raw;
+    return safeTrack;
+  };
+
+  const getPreloadKey = useCallback((track, preloadQuality = quality) => {
+    const trackId = getTrackId(track);
+    return trackId == null ? '' : `${trackId}|${preloadQuality}`;
+  }, [quality]);
+
+  const syncSearchUrl = useCallback((query, { replace = false } = {}) => {
+    if (typeof window === 'undefined') return;
+    const nextUrl = new URL(window.location.href);
+    nextUrl.pathname = '/search';
+    const trimmedQuery = String(query || '').trim();
+    if (trimmedQuery) {
+      nextUrl.searchParams.set('q', trimmedQuery);
+    } else {
+      nextUrl.searchParams.delete('q');
+    }
+    const nextPath = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+    const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextPath === currentPath) return;
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
+  }, []);
+
+  const saveLastPlayback = useCallback(() => {
+    if (!currentTrack) return;
+    const trackId = getTrackId(currentTrack);
+    if (trackId == null) return;
+    const currentSeconds = Number.isFinite(currentTimeRef.current) ? currentTimeRef.current : 0;
+    const durationSeconds = Number.isFinite(durationRef.current) ? durationRef.current : 0;
+    setLocalStorage(LAST_PLAYBACK_KEY, {
+      track: buildPersistableTrack(currentTrack),
+      currentTime: Math.max(0, currentSeconds),
+      duration: Math.max(0, durationSeconds),
+      quality,
+      wasPlaying: Boolean(isPlaying),
+      savedAt: Date.now()
+    });
+  }, [currentTrack, isPlaying, quality]);
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -119,6 +178,43 @@ const App = () => {
   useEffect(() => {
     durationRef.current = duration;
   }, [duration]);
+
+  useEffect(() => {
+    if (restoredPlaybackRef.current) return;
+    restoredPlaybackRef.current = true;
+    const saved = getLocalStorage(LAST_PLAYBACK_KEY, null);
+    const savedTrack = saved?.track;
+    const savedTrackId = getTrackId(savedTrack);
+    if (!savedTrack || savedTrackId == null) return;
+
+    if (saved?.quality) {
+      setQuality(saved.quality);
+    }
+
+    restoreTrackState(savedTrack, saved.currentTime || 0, saved.duration || savedTrack.duration || 0);
+    setQueue(prev => (
+      prev.some(track => String(getTrackId(track)) === String(savedTrackId))
+        ? prev
+        : [savedTrack, ...prev]
+    ));
+  }, [restoreTrackState, setQuality]);
+
+  useEffect(() => {
+    saveLastPlayback();
+  }, [currentTrack, quality, saveLastPlayback]);
+
+  useEffect(() => {
+    if (!currentTrack) return undefined;
+    const intervalId = window.setInterval(saveLastPlayback, 2000);
+    return () => window.clearInterval(intervalId);
+  }, [currentTrack, saveLastPlayback]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handleBeforeUnload = () => saveLastPlayback();
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [saveLastPlayback]);
 
   useEffect(() => {
     if (!currentTrack) return;
@@ -354,11 +450,14 @@ const App = () => {
   };
 
   // Búsqueda
-  const handleSearch = async (query) => {
+  const handleSearch = useCallback(async (query, options = {}) => {
     setLoading(true);
     setError(null);
     try {
       const trimmedQuery = String(query || '').trim();
+      if (options.updateUrl !== false) {
+        syncSearchUrl(trimmedQuery, { replace: Boolean(options.replaceUrl) });
+      }
       if (!trimmedQuery) {
         setSearchResultsByType({
           tracks: [],
@@ -424,7 +523,35 @@ const App = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [syncSearchUrl]);
+
+  useEffect(() => {
+    if (urlSearchInitializedRef.current || typeof window === 'undefined') return undefined;
+    urlSearchInitializedRef.current = true;
+
+    const applySearchFromUrl = () => {
+      const path = window.location.pathname.replace(/\/+$/, '') || '/';
+      const params = new URLSearchParams(window.location.search);
+      const urlQuery = params.get('q') || '';
+      if (path === '/search' || urlQuery) {
+        setActiveTab('search');
+        if (urlQuery.trim()) {
+          handleSearch(urlQuery, { updateUrl: false });
+        }
+      }
+    };
+
+    applySearchFromUrl();
+    window.addEventListener('popstate', applySearchFromUrl);
+    return () => window.removeEventListener('popstate', applySearchFromUrl);
+  }, [handleSearch]);
+
+  const handleTabChange = useCallback((tab) => {
+    setActiveTab(tab);
+    if (tab === 'search') {
+      syncSearchUrl(searchQuery, { replace: false });
+    }
+  }, [searchQuery, syncSearchUrl]);
 
   const recordPlayback = async ({ skipReason = null, endedNaturally = false } = {}) => {
     const state = playbackRef.current;
@@ -499,7 +626,22 @@ const App = () => {
       recorded: false
     };
 
-    playTrack(track);
+    const preloadKey = getPreloadKey(track);
+    const preloadedTrackData = preloadKey ? preloadCacheRef.current.get(preloadKey) : null;
+    playTrack(track, { preloadedTrackData });
+    if (preloadKey) {
+      const preloadedAudio = preloadAudioRef.current.get(preloadKey);
+      if (preloadedAudio) {
+        try {
+          preloadedAudio.pause();
+          preloadedAudio.removeAttribute('src');
+          preloadedAudio.load();
+        } catch {
+          // Ignore preload cleanup errors.
+        }
+      }
+      preloadAudioRef.current.delete(preloadKey);
+    }
 
     // Agregar a cola si no est??
     if (track?.id != null) {
@@ -690,6 +832,103 @@ const App = () => {
       return [];
     }
   };
+
+  const getPreloadCandidates = useCallback(() => {
+    const currentId = getTrackId(currentTrack);
+    const seen = new Set(currentId != null ? [String(currentId)] : []);
+    const candidates = [];
+    const addCandidate = (track) => {
+      const trackId = getTrackId(track);
+      if (!track || trackId == null) return;
+      const key = String(trackId);
+      if (seen.has(key)) return;
+      seen.add(key);
+      candidates.push(track);
+    };
+
+    if (Array.isArray(queue) && queue.length > 0) {
+      const currentIndex = currentId == null
+        ? -1
+        : queue.findIndex(track => String(getTrackId(track)) === String(currentId));
+      const queueCandidates = currentIndex >= 0
+        ? queue.slice(currentIndex + 1)
+        : queue;
+      queueCandidates.forEach(addCandidate);
+    }
+
+    if (Array.isArray(recommendedTracks)) {
+      recommendedTracks.forEach(addCandidate);
+    }
+
+    return candidates.slice(0, NEXT_PRELOAD_LIMIT);
+  }, [currentTrack, queue, recommendedTracks]);
+
+  useEffect(() => {
+    const candidates = getPreloadCandidates();
+    const wantedKeys = new Set(candidates.map(track => getPreloadKey(track)).filter(Boolean));
+
+    for (const [key, audio] of preloadAudioRef.current.entries()) {
+      if (wantedKeys.has(key)) continue;
+      try {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+      } catch {
+        // Ignore preload cleanup errors.
+      }
+      preloadAudioRef.current.delete(key);
+    }
+
+    for (const key of Array.from(preloadCacheRef.current.keys())) {
+      if (wantedKeys.has(key) || preloadCacheRef.current.size <= MAX_PRELOAD_CACHE_ITEMS) continue;
+      preloadCacheRef.current.delete(key);
+    }
+
+    candidates.forEach((track) => {
+      const key = getPreloadKey(track);
+      if (!key || preloadCacheRef.current.has(key) || preloadInFlightRef.current.has(key)) return;
+
+      preloadInFlightRef.current.add(key);
+      api.track.getTrack(getTrackId(track), quality, track)
+        .then((trackData) => {
+          preloadCacheRef.current.set(key, trackData);
+          while (preloadCacheRef.current.size > MAX_PRELOAD_CACHE_ITEMS) {
+            const oldestKey = preloadCacheRef.current.keys().next().value;
+            preloadCacheRef.current.delete(oldestKey);
+          }
+
+          const isDash = trackData?.manifestMimeType === 'application/dash+xml';
+          if (isDash || !trackData?.url || typeof Audio === 'undefined') return;
+
+          const audio = new Audio();
+          audio.preload = 'auto';
+          audio.src = trackData.url;
+          audio.load();
+          preloadAudioRef.current.set(key, audio);
+        })
+        .catch(() => {
+          // Preload is opportunistic; normal playback still handles errors/fallbacks.
+        })
+        .finally(() => {
+          preloadInFlightRef.current.delete(key);
+        });
+    });
+  }, [getPreloadCandidates, getPreloadKey, quality]);
+
+  useEffect(() => () => {
+    for (const audio of preloadAudioRef.current.values()) {
+      try {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+      } catch {
+        // Ignore preload cleanup errors.
+      }
+    }
+    preloadAudioRef.current.clear();
+    preloadCacheRef.current.clear();
+    preloadInFlightRef.current.clear();
+  }, []);
 
   const handleDownloadTrack = async (track) => {
     if (!track?.id) return;
@@ -1661,7 +1900,7 @@ const App = () => {
       {/* Navegación */}
       <Navigation
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         isAuthenticated={isAuthenticated}
         user={user}
         showUserMenu={showUserMenu}

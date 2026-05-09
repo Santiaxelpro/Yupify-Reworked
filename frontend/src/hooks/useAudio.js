@@ -362,11 +362,15 @@ export const useAudio = () => {
     return merged;
   };
 
-  const playTrack = async (track) => {
+  const playTrack = async (track, options = {}) => {
     try {
       cancelFade();
       console.log("📀 Loading track:", track.id, track.title);
       console.log("🎚 Using quality:", quality);
+
+      const resumeAt = Number(options.startAt);
+      const startAt = Number.isFinite(resumeAt) && resumeAt > 0 ? resumeAt : 0;
+      const shouldAutoplay = options.autoplay !== false;
 
       // Obtener el audio element (global o del DOM)
       let audioElement = audioRef.current || getAudioElement();
@@ -377,6 +381,48 @@ export const useAudio = () => {
       }
 
       console.log("✅ Audio element disponible");
+
+      const applyStartTime = (audio, targetTime = startAt) => {
+        if (!audio || !Number.isFinite(targetTime) || targetTime <= 0) return;
+        const seek = () => {
+          try {
+            const safeDuration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
+            const nextTime = safeDuration ? Math.min(targetTime, Math.max(0, safeDuration - 1)) : targetTime;
+            audio.currentTime = Math.max(0, nextTime);
+            currentTimeRef.current = audio.currentTime || nextTime;
+            setCurrentTime(currentTimeRef.current);
+          } catch (e) {
+            console.warn('No se pudo restaurar posiciÃ³n:', e);
+          }
+        };
+
+        if (Number.isFinite(audio.duration) && audio.duration > 0) {
+          seek();
+          return;
+        }
+
+        audio.addEventListener('loadedmetadata', seek, { once: true });
+      };
+
+      const startOrPrimeAudio = (audio) => {
+        applyStartTime(audio);
+        if (!shouldAutoplay) {
+          audio.pause();
+          setIsPlaying(false);
+          return;
+        }
+
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsPlaying(true);
+            })
+            .catch(error => {
+              console.error("âŒ Play error:", error);
+            });
+        }
+      };
 
       const getPlayableMimes = (data) => {
         if (!data) return [];
@@ -424,8 +470,7 @@ export const useAudio = () => {
               if (audioElement) {
                 audioElement.src = fallbackData.url;
                 audioElement.load();
-                audioElement.play().catch(console.error);
-                setIsPlaying(true);
+                startOrPrimeAudio(audioElement);
               }
               return true;
             }
@@ -437,7 +482,8 @@ export const useAudio = () => {
       };
 
       // Obtener track data con calidad seleccionada
-      const trackData = await api.track.getTrack(track.id, quality, track);
+      const preloadedTrackData = options.preloadedTrackData;
+      const trackData = preloadedTrackData || await api.track.getTrack(track.id, quality, track);
       console.log("📡 Track data:", trackData);
       const presentation = String(trackData?.assetPresentation || '').toUpperCase();
 
@@ -497,8 +543,11 @@ export const useAudio = () => {
           setStreamUrl(null); // No hay URL simple para DASH
           
           setIsPlaying(false);
-          setCurrentTime(0);
+          setCurrentTime(startAt);
+          currentTimeRef.current = startAt;
+          applyStartTime(audioElement);
 
+          if (shouldAutoplay) {
           const playPromise = audioElement.play();
           if (playPromise !== undefined) {
             playPromise
@@ -509,6 +558,7 @@ export const useAudio = () => {
               .catch(error => {
                 console.error("❌ DASH Play error:", error);
               });
+          }
           }
         } catch (error) {
           console.error("❌ Error en DASH playback:", error);
@@ -555,7 +605,8 @@ export const useAudio = () => {
         setStreamUrl(realUrl);
         
         setIsPlaying(false);
-        setCurrentTime(0);
+        setCurrentTime(startAt);
+        currentTimeRef.current = startAt;
 
         if (audioElement) {
           audioElement.src = realUrl;
@@ -563,17 +614,7 @@ export const useAudio = () => {
           audioElement.load();
         }
 
-        const playPromise = audioElement?.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-
-              setIsPlaying(true);
-            })
-            .catch(error => {
-              console.error("❌ Play error:", error);
-            });
-        }
+        if (audioElement) startOrPrimeAudio(audioElement);
       }
 
     } catch (error) {
@@ -600,9 +641,12 @@ export const useAudio = () => {
   // ============================
   useEffect(() => {
     localStorage.setItem('audioQuality', quality);
-    if (currentTrack && (isPlaying || duration > 0)) {
+    if (currentTrack && (isPlaying || streamUrl || currentTrack.streamUrl || currentTrack.manifest)) {
 
-      playTrack(currentTrack);
+      playTrack(currentTrack, {
+        startAt: currentTimeRef.current,
+        autoplay: isPlaying
+      });
     }
   }, [quality]);
 
@@ -614,11 +658,19 @@ export const useAudio = () => {
     const audio = audioRef.current || getAudioElement();
     if (!audio) return;
 
+    if (currentTrackRef.current && !audio.currentSrc && !audio.src) {
+      playTrack(currentTrackRef.current, {
+        startAt: currentTimeRef.current,
+        autoplay: true
+      });
+      return;
+    }
+
     cancelFade();
     audio.volume = isMuted ? 0 : volume;
     audio.play().catch(console.error);
     setIsPlaying(true);
-  }, [cancelFade, isMuted, volume]);
+  }, [cancelFade, isMuted, playTrack, volume]);
 
   const pauseWithFade = useCallback(() => {
     const audio = audioRef.current || getAudioElement();
@@ -664,6 +716,26 @@ export const useAudio = () => {
     onEndedRef.current = typeof fn === 'function' ? fn : null;
   }, []);
 
+  const restoreTrackState = useCallback((track, startAt = 0, savedDuration = 0) => {
+    if (!track) return;
+    const audio = audioRef.current || getAudioElement();
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+
+    const nextTime = Number.isFinite(Number(startAt)) && Number(startAt) > 0 ? Number(startAt) : 0;
+    const nextDuration = Number.isFinite(Number(savedDuration)) && Number(savedDuration) > 0 ? Number(savedDuration) : 0;
+    currentTrackRef.current = track;
+    currentTimeRef.current = nextTime;
+    setCurrentTrack(track);
+    setStreamUrl(null);
+    setCurrentTime(nextTime);
+    setDuration(nextDuration);
+    setIsPlaying(false);
+  }, []);
+
   // Funciones dummy - los event listeners ya están en el useEffect global
 
 
@@ -694,7 +766,8 @@ export const useAudio = () => {
     setIsRepeat,
     setIsShuffle,
     setQuality,      // ⬅ NUEVO
-    setOnEndedCallback
+    setOnEndedCallback,
+    restoreTrackState
   };
 };
 

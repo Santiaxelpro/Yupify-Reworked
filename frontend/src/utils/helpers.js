@@ -149,6 +149,18 @@ export const getArtistName = (track) => {
 /**
  * Obtener calidad de audio formateada
  */
+export const normalizeAudioQuality = (quality) => {
+  if (quality == null) return '';
+  const normalized = String(quality).toUpperCase().trim().replace(/[\s-]+/g, '_').replace(/_+/g, '_');
+  const compact = normalized.replace(/_/g, '');
+  if (compact === 'HIRESLOSSLESS' || compact === 'HIRESLOSSLSS') return 'HI_RES_LOSSLESS';
+  if (compact === 'HIRES') return 'HI_RES';
+  if (compact === 'LOSSLESS' || compact === 'LOSSLSS') return 'LOSSLESS';
+  if (compact === 'HIGH') return 'HIGH';
+  if (compact === 'LOW') return 'LOW';
+  return normalized;
+};
+
 export const getAudioQuality = (quality) => {
   const qualities = {
     'HI_RES_LOSSLESS': '192kHz/24bit FLAC',
@@ -157,8 +169,9 @@ export const getAudioQuality = (quality) => {
     'HIGH': '320kbps AAC',
     'LOW': '96kbps AAC'
   };
-  
-  return qualities[quality] || quality;
+
+  const normalized = normalizeAudioQuality(quality);
+  return qualities[normalized] || normalized || quality;
 };
 
 /**
@@ -169,7 +182,7 @@ export const getTrackQualityValue = (track, fallback = '') => {
   const getQualityFromTags = (tags) => {
     if (!Array.isArray(tags) || tags.length === 0) return null;
     const normalized = tags
-      .map(tag => String(tag || '').toUpperCase().replace(/[\s-]+/g, '_'))
+      .map(tag => normalizeAudioQuality(tag))
       .filter(Boolean);
     if (normalized.includes('HIRES_LOSSLESS') || normalized.includes('HI_RES_LOSSLESS')) {
       return 'HI_RES_LOSSLESS';
@@ -207,7 +220,7 @@ export const getTrackQualityValue = (track, fallback = '') => {
   ];
   for (const value of candidates) {
     if (typeof value === 'string' && value.trim()) {
-      return value.trim();
+      return normalizeAudioQuality(value) || value.trim();
     }
   }
   return fallback;
@@ -220,7 +233,7 @@ export const formatQualityLabel = (quality, fallback = '') => {
   if (quality == null) return fallback;
   const text = String(quality).trim();
   if (!text) return fallback;
-  return text.replace(/_/g, ' ');
+  return (normalizeAudioQuality(text) || text).replace(/_/g, ' ');
 };
 
 /**

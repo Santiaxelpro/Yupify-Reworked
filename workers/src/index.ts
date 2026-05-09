@@ -42,6 +42,7 @@ const FAST_SEARCH_POOL = 4;
 const FAST_TRACK_POOL = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const TRACK_TIMEOUT_MS = 4500;
+const TRACK_FALLBACK_TIMEOUT_MS = 2500;
 
 const TRENDING_TTL_MS = 15 * 60 * 1000;
 const TRENDING_TARGET = 600;
@@ -304,9 +305,13 @@ function normalizeQualityValue(value: any): string | null {
   if (!value) return null;
   const raw = String(value).toUpperCase().trim();
   if (!raw) return null;
-  const normalized = raw.replace(/[\s-]+/g, '_');
-  if (normalized === 'HIRES_LOSSLESS') return 'HI_RES_LOSSLESS';
-  if (normalized === 'HIRES') return 'HI_RES';
+  const normalized = raw.replace(/[\s-]+/g, '_').replace(/_+/g, '_');
+  const compact = normalized.replace(/_/g, '');
+  if (compact === 'HIRESLOSSLESS' || compact === 'HIRESLOSSLSS') return 'HI_RES_LOSSLESS';
+  if (compact === 'HIRES') return 'HI_RES';
+  if (compact === 'LOSSLESS' || compact === 'LOSSLSS') return 'LOSSLESS';
+  if (compact === 'HIGH') return 'HIGH';
+  if (compact === 'LOW') return 'LOW';
   return normalized;
 }
 
@@ -394,7 +399,7 @@ async function searchAnyAPI(env: Env, query: string, limit = 1): Promise<TrackIt
 
 async function fetchFirstTrackData(apis: string[], id: string, quality: string, timeoutMs: number) {
   const requests = apis.map(api => {
-    const url = `${api}/track/?id=${encodeURIComponent(id)}&quality=${encodeURIComponent(quality)}`;
+    const url = `${api}/trackManifests/?id=${encodeURIComponent(id)}&quality=${encodeURIComponent(quality)}`;
     return fetchJson(url, timeoutMs)
       .then(data => {
         const payload = data?.data ?? data;
@@ -578,10 +583,14 @@ function getTrackQualityFallback(requested: string): string[] {
   const qualityFallback: Record<string, string[]> = {
     HI_RES_LOSSLESS: ['HI_RES_LOSSLESS', 'LOSSLESS', 'HIGH', 'LOW'],
     LOSSLESS: ['LOSSLESS', 'HIGH', 'LOW'],
-    HIGH: ['HIGH', 'LOSSLESS', 'LOW'],
+    HIGH: ['HIGH', 'LOW', 'LOSSLESS'],
     LOW: ['LOW', 'HIGH', 'LOSSLESS']
   };
   return qualityFallback[requested] || [requested];
+}
+
+function getTrackAttemptTimeoutMs(quality: string, requestedQuality: string): number {
+  return quality === requestedQuality ? TRACK_TIMEOUT_MS : TRACK_FALLBACK_TIMEOUT_MS;
 }
 async function handleSearch(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
   const q = url.searchParams.get('q');
@@ -648,9 +657,10 @@ async function handleTrack(request: Request, url: URL, env: Env, headers: Header
   const qualitiesToTry = getTrackQualityFallback(requestedQuality);
 
   for (const quality of qualitiesToTry) {
-    success = await fetchFirstTrackData(fast, id, quality, TRACK_TIMEOUT_MS);
+    const attemptTimeoutMs = getTrackAttemptTimeoutMs(quality, requestedQuality);
+    success = await fetchFirstTrackData(fast, id, quality, attemptTimeoutMs);
     if (!success) {
-      success = await fetchFirstTrackData(apis, id, quality, TRACK_TIMEOUT_MS);
+      success = await fetchFirstTrackData(apis, id, quality, attemptTimeoutMs);
     }
     if (success) {
       usedQuality = quality;
@@ -675,14 +685,18 @@ async function handleTrack(request: Request, url: URL, env: Env, headers: Header
   }
 
   const reportedQuality = normalizeQualityValue(respData?.audioQuality || respData?.quality || respData?.streamQuality);
-  if (!isDashMime(respData?.manifestMimeType) && reportedQuality && VALID_QUALITIES.includes(reportedQuality)) {
+  if (isDashMime(respData?.manifestMimeType)) {
+    usedQuality = reportedQuality === 'HI_RES_LOSSLESS' || reportedQuality === 'LOSSLESS'
+      ? reportedQuality
+      : 'HI_RES_LOSSLESS';
+  } else if (reportedQuality && VALID_QUALITIES.includes(reportedQuality)) {
     usedQuality = reportedQuality;
   }
 
   const payload = {
     ...respData,
     requestedQuality,
-    usedQuality: usedQuality || requestedQuality
+    usedQuality: normalizeQualityValue(usedQuality) || requestedQuality
   };
 
   return jsonResponse(payload, 200, headers);
