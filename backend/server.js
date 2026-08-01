@@ -627,7 +627,7 @@ const TRACK_FALLBACK_TIMEOUT_MS = Number.isFinite(parsedTrackFallbackTimeoutMs) 
   ? parsedTrackFallbackTimeoutMs
   : Math.min(TRACK_TIMEOUT_MS, 2500);
 const QOBUZ_FALLBACK_ENABLED = process.env.QOBUZ_FALLBACK_ENABLED !== 'false';
-const DEFAULT_QOBUZ_API_BASES = ['https://qobuz.kennyy.com.br', 'https://qbz.spotisaver.net', 'https://qobuz.squid.wtf'];
+const DEFAULT_QOBUZ_API_BASES = ['https://qobuz.itzsantiax.qzz.io']; // api oficial in workers
 const QOBUZ_API_BASES = dedupeStrings(
   (process.env.QOBUZ_API_BASES || process.env.QOBUZ_API_BASE || DEFAULT_QOBUZ_API_BASES.join(','))
     .toString()
