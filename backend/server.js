@@ -75,6 +75,14 @@ const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 const axiosFast = axios.create({ httpAgent, httpsAgent });
 
+const parsePositiveTimeout = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const LYRICS_API_TIMEOUT_MS = parsePositiveTimeout(process.env.LYRICS_API_TIMEOUT_MS, 20000);
+const LYRICS_ISRC_TIMEOUT_MS = parsePositiveTimeout(process.env.LYRICS_ISRC_TIMEOUT_MS, 18000);
+
 // ============================================================
 // Utilidades de descompresión para payloads de letras
 // (los proveedores/búsquedas en GDrive pueden devolver binario gzip)
@@ -185,13 +193,13 @@ async function fetchBinimumIsrcLyrics(isrc) {
   if (!normalized) return null;
 
   const apiUrl = `https://lyrics-api.binimum.org/?isrc=${encodeURIComponent(normalized)}`;
-  const searchResp = await axios.get(apiUrl, { timeout: 12000, responseType: 'arraybuffer' });
+  const searchResp = await axios.get(apiUrl, { timeout: LYRICS_ISRC_TIMEOUT_MS, responseType: 'arraybuffer' });
   const searchData = decodeLyricsBody(searchResp.data);
   const results = Array.isArray(searchData?.results) ? searchData.results : [];
   const first = results[0];
   if (!first?.lyricsUrl) return null;
 
-  const ttmlResp = await axios.get(first.lyricsUrl, { timeout: 12000, responseType: 'arraybuffer' });
+  const ttmlResp = await axios.get(first.lyricsUrl, { timeout: LYRICS_ISRC_TIMEOUT_MS, responseType: 'arraybuffer' });
   const ttml = decodeLyricsBody(ttmlResp.data);
   const lines = parseAppleTtmlToLines(typeof ttml === 'string' ? ttml : JSON.stringify(ttml));
   if (!lines.length) return null;
@@ -764,15 +772,15 @@ const SEARCH_API_POOL = Number.isFinite(parsedSearchApiPool) && parsedSearchApiP
   ? parsedSearchApiPool
   : 6;
 const EXHAUSTIVE_SEARCH = process.env.EXHAUSTIVE_SEARCH === 'true';
-const SEARCH_TIMEOUT_MS = 4500;
+const SEARCH_TIMEOUT_MS = parsePositiveTimeout(process.env.SEARCH_TIMEOUT_MS, 6500);
 const parsedTrackTimeoutMs = Number(process.env.TRACK_TIMEOUT_MS);
 const TRACK_TIMEOUT_MS = Number.isFinite(parsedTrackTimeoutMs) && parsedTrackTimeoutMs > 0
   ? parsedTrackTimeoutMs
-  : 4500;
+  : 7000;
 const parsedTrackFallbackTimeoutMs = Number(process.env.TRACK_FALLBACK_TIMEOUT_MS);
 const TRACK_FALLBACK_TIMEOUT_MS = Number.isFinite(parsedTrackFallbackTimeoutMs) && parsedTrackFallbackTimeoutMs > 0
   ? parsedTrackFallbackTimeoutMs
-  : Math.min(TRACK_TIMEOUT_MS, 2500);
+  : Math.min(TRACK_TIMEOUT_MS, 4500);
 const QOBUZ_FALLBACK_ENABLED = process.env.QOBUZ_FALLBACK_ENABLED !== 'false';
 const DEFAULT_QOBUZ_API_BASES = ['https://qobuz.itzsantiax.qzz.io, https://qobuz-br-southeast.kennyy.com.br/']; // api oficial in workers and kennyy api
 const QOBUZ_API_BASES = dedupeStrings(
@@ -785,11 +793,11 @@ const QOBUZ_API_BASES = dedupeStrings(
 const parsedQobuzSearchTimeoutMs = Number(process.env.QOBUZ_SEARCH_TIMEOUT_MS);
 const QOBUZ_SEARCH_TIMEOUT_MS = Number.isFinite(parsedQobuzSearchTimeoutMs) && parsedQobuzSearchTimeoutMs > 0
   ? parsedQobuzSearchTimeoutMs
-  : 5000;
+  : 8000;
 const parsedQobuzDownloadTimeoutMs = Number(process.env.QOBUZ_DOWNLOAD_TIMEOUT_MS);
 const QOBUZ_DOWNLOAD_TIMEOUT_MS = Number.isFinite(parsedQobuzDownloadTimeoutMs) && parsedQobuzDownloadTimeoutMs > 0
   ? parsedQobuzDownloadTimeoutMs
-  : 7000;
+  : 10000;
 
 // ==================== AMAZON MUSIC FALLBACK (amz.spotisaver.net) ====================
 const AMAZON_FALLBACK_ENABLED = process.env.AMAZON_FALLBACK_ENABLED !== 'false';
@@ -804,11 +812,11 @@ const AMAZON_API_BASES = dedupeStrings(
 const parsedAmazonSearchTimeoutMs = Number(process.env.AMAZON_SEARCH_TIMEOUT_MS);
 const AMAZON_SEARCH_TIMEOUT_MS = Number.isFinite(parsedAmazonSearchTimeoutMs) && parsedAmazonSearchTimeoutMs > 0
   ? parsedAmazonSearchTimeoutMs
-  : 6000;
+  : 9000;
 const parsedAmazonStreamTimeoutMs = Number(process.env.AMAZON_STREAM_TIMEOUT_MS);
 const AMAZON_STREAM_TIMEOUT_MS = Number.isFinite(parsedAmazonStreamTimeoutMs) && parsedAmazonStreamTimeoutMs > 0
   ? parsedAmazonStreamTimeoutMs
-  : 8000;
+  : 12000;
 // Calidad por defecto para Amazon (SD_HIGH / HD_44 / UHD_96 / UHD_192)
 const AMAZON_QUALITY = (process.env.AMAZON_QUALITY || '').toString().trim() || 'SD_HIGH';
 // Amazon requiere un .wvd (Widevine device file) para descifrar claves
@@ -5120,7 +5128,10 @@ app.get('/api/lyrics', async (req, res) => {
             const url = `${baseUrl}?${new URLSearchParams(requestParams)}`;
             console.log("-> Lyrics API:", url);
             try {
-              const response = await axios.get(url, { timeout: 15000, responseType: 'arraybuffer' });
+              const response = await axios.get(url, {
+                timeout: LYRICS_API_TIMEOUT_MS,
+                responseType: 'arraybuffer'
+              });
               const payload = attachLyricsSource(parseLyricsPayload(decodeLyricsBody(response.data)), requestedSource);
 
               if (hasLyrics(payload)) {
