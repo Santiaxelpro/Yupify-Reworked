@@ -44,3 +44,8 @@ Thumbs.db
 # Tauri
 frontend/src-tauri/target/
 .vercel
+
+# Sensitive local files
+my-release-key.jks
+proxy-master.txt
+backend/*.log

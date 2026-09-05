@@ -18,7 +18,7 @@ const TrackList = ({ tracks, onPlay, onToggleFavorite, onDownload, onSelectArtis
   return (
     <div className="space-y-2">
       {tracks.map((track, index) => {
-        const coverUrl = getCoverUrl(track, 1280);
+        const coverUrl = getCoverUrl(track, 160);
         const itemType = String(track?.type || 'track').toLowerCase();
         const qualityLabel = formatQualityLabel(getTrackQualityValue(track, ''), '');
         const releaseYear = typeof track?.releaseDate === 'string' ? track.releaseDate.slice(0, 4) : '';

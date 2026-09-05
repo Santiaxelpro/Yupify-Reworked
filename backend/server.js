@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const http = require('http');
 const https = require('https');
+const zlib = require('zlib');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
@@ -73,6 +74,143 @@ app.set("trust proxy", 1);
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 const axiosFast = axios.create({ httpAgent, httpsAgent });
+
+// ============================================================
+// Utilidades de descompresión para payloads de letras
+// (los proveedores/búsquedas en GDrive pueden devolver binario gzip)
+// ============================================================
+function isGzipBuffer(buf) {
+  return Buffer.isBuffer(buf) && buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+}
+
+// Detecta strings que son gzip binario (intacto o ya corrupto por round-trip utf8)
+function isGzipMangledString(value) {
+  if (typeof value !== 'string' || value.length < 4) return false;
+  const c0 = value.charCodeAt(0);
+  const c1 = value.charCodeAt(1);
+  const intact = c0 === 0x1f && c1 === 0x8b;
+  const mangled = c0 === 0x1f && c1 === 0x08 && value.charCodeAt(2) === 0;
+  return intact || mangled;
+}
+
+// Recorre el payload buscando strings gzip (binario ya dañado) para descartarlo
+function hasMangledGzipField(obj) {
+  let bad = false;
+  const walk = (v) => {
+    if (bad) return;
+    if (typeof v === 'string') {
+      if (isGzipMangledString(v)) bad = true;
+    } else if (Array.isArray(v)) {
+      for (const item of v) walk(item);
+    } else if (v && typeof v === 'object') {
+      for (const val of Object.values(v)) walk(val);
+    }
+  };
+  walk(obj);
+  return bad;
+}
+
+// Recibe Buffer de un fetch con responseType arraybuffer y devuelve el
+// objeto/string ya descomprimido y parseado (soporta gzip plano o JSON plano).
+function decodeLyricsBody(body) {
+  if (Buffer.isBuffer(body)
+    || (body && typeof body === 'object' && body.type === 'Buffer' && Array.isArray(body.data))) {
+    let buf = Buffer.isBuffer(body) ? body : Buffer.from(body.data);
+    if (isGzipBuffer(buf)) {
+      try {
+        buf = zlib.gunzipSync(buf);
+      } catch (e) {
+        /* no es gzip válido, se deja como está */
+      }
+    }
+    const text = buf.toString('utf8');
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return text;
+    }
+  }
+  return body;
+}
+
+// ============================================================
+// Presentación de letras sincronizadas de fuente binimum-isrc
+// (API https://lyrics-api.binimum.org/ devuelve un lyricsUrl TTML)
+// ============================================================
+function parseAppleTtmlTime(value) {
+  const str = String(value || '').trim();
+  const parts = str.split(':');
+  let seconds = 0;
+  if (parts.length === 3) {
+    seconds = Number(parts[0]) * 3600 + Number(parts[1]) * 60 + parseFloat(String(parts[2]).replace(',', '.'));
+  } else if (parts.length === 2) {
+    seconds = Number(parts[0]) * 60 + parseFloat(String(parts[1]).replace(',', '.'));
+  } else {
+    seconds = parseFloat(str.replace(',', '.'));
+  }
+  return Number.isFinite(seconds) ? seconds : 0;
+}
+
+function parseAppleTtmlToLines(ttml) {
+  const text = String(ttml || '');
+  const lines = [];
+  const pRe = /<p\b[^>]*\bbegin=["']([^"']+)["'][^>]*\bend=["']([^"']+)["'][^>]*>(.*?)<\/p>/gs;
+  let match;
+  while ((match = pRe.exec(text)) !== null) {
+    const time = parseAppleTtmlTime(match[1]);
+    const end = parseAppleTtmlTime(match[2]);
+    const raw = match[3]
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!raw) continue;
+    lines.push({
+      time,
+      duration: Math.max(0, end - time),
+      text: raw
+    });
+  }
+  return lines;
+}
+
+// Busca letras de binimum por ISRC y las devuelve en formato de líneas
+// (misma estructura que el frontend espera: lines[].time/duration/text)
+async function fetchBinimumIsrcLyrics(isrc) {
+  const normalized = String(isrc || '').trim().toUpperCase();
+  if (!normalized) return null;
+
+  const apiUrl = `https://lyrics-api.binimum.org/?isrc=${encodeURIComponent(normalized)}`;
+  const searchResp = await axios.get(apiUrl, { timeout: 12000, responseType: 'arraybuffer' });
+  const searchData = decodeLyricsBody(searchResp.data);
+  const results = Array.isArray(searchData?.results) ? searchData.results : [];
+  const first = results[0];
+  if (!first?.lyricsUrl) return null;
+
+  const ttmlResp = await axios.get(first.lyricsUrl, { timeout: 12000, responseType: 'arraybuffer' });
+  const ttml = decodeLyricsBody(ttmlResp.data);
+  const lines = parseAppleTtmlToLines(typeof ttml === 'string' ? ttml : JSON.stringify(ttml));
+  if (!lines.length) return null;
+
+  return {
+    lines,
+    type: 'Line',
+    title: first.track_name || '',
+    artist: first.artist_name || '',
+    album: first.album_name || '',
+    duration: first.duration || null,
+    isrc: first.isrc || normalized,
+    metadata: {
+      source: 'binimum-isrc',
+      title: first.track_name || '',
+      artist: first.artist_name || ''
+    }
+  };
+}
 
 const USE_POSTGRES = Boolean(process.env.DATABASE_URL);
 let pool = null;
@@ -396,14 +534,19 @@ async function _loadLyricsCacheFromGDrive(cacheKey, sources) {
       if (LYRICS_CACHE_DEBUG) {
         console.log('[lyrics-cache] GDrive HIT:', fileName, 'id:', file.id, 'folder:', folderId);
       }
+      let parsedContent = content;
       if (typeof content === 'string') {
         try {
-          return JSON.parse(content);
+          parsedContent = JSON.parse(content);
         } catch {
-          return content;
+          parsedContent = content;
         }
       }
-      return content;
+      if (hasMangledGzipField(parsedContent)) {
+        console.warn('[lyrics-cache] GDrive cache corrupta (gzip mangled), se ignora:', fileName);
+        return null;
+      }
+      return parsedContent;
     } catch (e) {
       if (LYRICS_CACHE_DEBUG) {
         const status = e?.response?.status;
@@ -453,6 +596,10 @@ async function loadLyricsCachesFromGDrive(cacheKey, sources) {
         } catch {
           payload = content;
         }
+      }
+      if (hasMangledGzipField(payload)) {
+        console.warn('[lyrics-cache] GDrive cache corrupta (gzip mangled), se ignora:', fileName);
+        continue;
       }
       const sourceHint = extractSourceFromPayload(payload) || getSourceForFolder(folderId) || '';
       results.push({ source: sourceHint, payload, folderId, fileId: file.id });
@@ -644,6 +791,29 @@ const QOBUZ_DOWNLOAD_TIMEOUT_MS = Number.isFinite(parsedQobuzDownloadTimeoutMs) 
   ? parsedQobuzDownloadTimeoutMs
   : 7000;
 
+// ==================== AMAZON MUSIC FALLBACK (amz.spotisaver.net) ====================
+const AMAZON_FALLBACK_ENABLED = process.env.AMAZON_FALLBACK_ENABLED !== 'false';
+const DEFAULT_AMAZON_API_BASES = ['https://amz.spotisaver.net'];
+const AMAZON_API_BASES = dedupeStrings(
+  (process.env.AMAZON_API_BASES || process.env.AMAZON_API_BASE || DEFAULT_AMAZON_API_BASES.join(','))
+    .toString()
+    .split(',')
+    .map(normalizeAmazonApiBase)
+    .filter(Boolean)
+);
+const parsedAmazonSearchTimeoutMs = Number(process.env.AMAZON_SEARCH_TIMEOUT_MS);
+const AMAZON_SEARCH_TIMEOUT_MS = Number.isFinite(parsedAmazonSearchTimeoutMs) && parsedAmazonSearchTimeoutMs > 0
+  ? parsedAmazonSearchTimeoutMs
+  : 6000;
+const parsedAmazonStreamTimeoutMs = Number(process.env.AMAZON_STREAM_TIMEOUT_MS);
+const AMAZON_STREAM_TIMEOUT_MS = Number.isFinite(parsedAmazonStreamTimeoutMs) && parsedAmazonStreamTimeoutMs > 0
+  ? parsedAmazonStreamTimeoutMs
+  : 8000;
+// Calidad por defecto para Amazon (SD_HIGH / HD_44 / UHD_96 / UHD_192)
+const AMAZON_QUALITY = (process.env.AMAZON_QUALITY || '').toString().trim() || 'SD_HIGH';
+// Amazon requiere un .wvd (Widevine device file) para descifrar claves
+const AMAZON_WVD_PATH = (process.env.AMAZON_WVD_PATH || '').toString().trim() || '';
+
 
 // Cache simple en memoria para trending
 const TRENDING_TTL_MS = 15 * 60 * 1000;
@@ -747,6 +917,7 @@ const HIFI_APIS = {
     'https://6.oregon.monochrome.tf',
     'https://7.frankfurt.monochrome.tf',
     'https://7.oregon.monochrome.tf',
+    'https://8.frankfurt.monochrome.tf',
     'https://8.oregon.monochrome.tf',
     'https://9.frankfurt.monochrome.tf',
     'https://9.oregon.monochrome.tf',
@@ -1761,10 +1932,24 @@ function isAllowedAudioProxyUrl(rawUrl) {
     return (
       hostname === 'audio.tidal.com'
       || hostname.endsWith('.audio.tidal.com')
-    );
+    ) || isAmazonAudioHost(hostname);
   } catch {
     return false;
   }
+}
+
+function isAmazonAudioHost(hostname) {
+  if (!hostname) return false;
+  const h = hostname.toLowerCase();
+  return (
+    h === 'amazon.com'
+    || h.endsWith('.amazon.com')
+    || h.endsWith('.amazonaws.com')
+    || h.endsWith('.media-amazon.com')
+    || h.endsWith('.cloudfront.net')
+    || h.endsWith('.amazonmusic.com')
+    || h.endsWith('.mzstatic.com')
+  );
 }
 
 function buildVideoProxyUrl(req, rawUrl) {
@@ -2112,18 +2297,15 @@ function getTrackAttemptTimeoutMs(quality, requestedQuality) {
   return quality === requestedQuality ? TRACK_TIMEOUT_MS : TRACK_FALLBACK_TIMEOUT_MS;
 }
 
-function shouldTryQobuzForQuality(quality, requestedQuality) {
-  return isLosslessQuality(requestedQuality) && isLosslessQuality(quality);
-}
-
-async function fetchTrackFallbackData({ id, requestedQuality, log = null }) {
+async function fetchTrackFallbackData({ id, requestedQuality, log = null, req = null }) {
   const qualitiesToTry = getQualityFallbackList(requestedQuality);
 
   for (const quality of qualitiesToTry) {
     const attemptTimeoutMs = getTrackAttemptTimeoutMs(quality, requestedQuality);
     const fallbackLabel = quality === requestedQuality ? '' : ' fallback';
-    log?.(`   -> HiFi${fallbackLabel} calidad: ${quality} (${attemptTimeoutMs}ms)`);
 
+    // Tidal/HiFi es la fuente prioritaria; si no encuentra, se pasa a las demás.
+    log?.(`   -> HiFi${fallbackLabel} calidad: ${quality} (${attemptTimeoutMs}ms)`);
     const hifiSuccess = await fetchFirstTrackFromHifiFallbacks({ id, quality, timeoutMs: attemptTimeoutMs });
     if (hifiSuccess) {
       return {
@@ -2134,24 +2316,34 @@ async function fetchTrackFallbackData({ id, requestedQuality, log = null }) {
       };
     }
 
-    if (shouldTryQobuzForQuality(quality, requestedQuality)) {
-      log?.(`   -> Qobuz fallback calidad: ${quality} (${attemptTimeoutMs}ms)`);
-      const qobuzSuccess = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs });
-      if (qobuzSuccess) {
-        return {
-          success: qobuzSuccess,
-          usedQuality: normalizeQualityValue(qobuzSuccess.data?.usedQuality) || quality,
-          matchedQuality: quality,
-          attemptedQualities: qualitiesToTry
-        };
-      }
+    log?.(`   -> Qobuz${fallbackLabel} calidad: ${quality} (${attemptTimeoutMs}ms)`);
+    const qobuzSuccess = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs });
+    if (qobuzSuccess) {
+      return {
+        success: qobuzSuccess,
+        usedQuality: normalizeQualityValue(qobuzSuccess.data?.usedQuality) || quality,
+        matchedQuality: quality,
+        attemptedQualities: qualitiesToTry
+      };
+    }
+
+    // Amazon Music fallback (DRM: requiere .wvd para descifrar claves)
+    log?.(`   -> Amazon fallback calidad: ${quality} (${attemptTimeoutMs}ms)`);
+    const amazonSuccess = await fetchAmazonFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs, req });
+    if (amazonSuccess) {
+      return {
+        success: amazonSuccess,
+        usedQuality: normalizeQualityValue(amazonSuccess.data?.usedQuality) || quality,
+        matchedQuality: quality,
+        attemptedQualities: qualitiesToTry
+      };
     }
   }
 
-  const qobuzFallbackQualities = isLosslessQuality(requestedQuality)
+  const nonLosslessFallbackQualities = isLosslessQuality(requestedQuality)
     ? qualitiesToTry.filter(quality => !isLosslessQuality(quality))
     : qualitiesToTry;
-  for (const quality of qobuzFallbackQualities) {
+  for (const quality of nonLosslessFallbackQualities) {
     const attemptTimeoutMs = getTrackAttemptTimeoutMs(quality, requestedQuality);
     log?.(`   -> Qobuz fallback calidad: ${quality} (${attemptTimeoutMs}ms)`);
     const qobuzSuccess = await fetchQobuzFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs });
@@ -2159,6 +2351,17 @@ async function fetchTrackFallbackData({ id, requestedQuality, log = null }) {
       return {
         success: qobuzSuccess,
         usedQuality: normalizeQualityValue(qobuzSuccess.data?.usedQuality) || quality,
+        matchedQuality: quality,
+        attemptedQualities: qualitiesToTry
+      };
+    }
+
+    log?.(`   -> Amazon fallback (no-lossless) calidad: ${quality} (${attemptTimeoutMs}ms)`);
+    const amazonSuccess = await fetchAmazonFallbackTrackData({ id, quality, timeoutMs: attemptTimeoutMs, req });
+    if (amazonSuccess) {
+      return {
+        success: amazonSuccess,
+        usedQuality: normalizeQualityValue(amazonSuccess.data?.usedQuality) || quality,
         matchedQuality: quality,
         attemptedQualities: qualitiesToTry
       };
@@ -2584,6 +2787,37 @@ function tryDecodeManifest(m) {
   }
 }
 
+// Asegura que un payload DASH tenga el manifest inline como string.
+// El frontend reproduce el DASH con Shaka Player usando el manifest inline
+// (para evitar CORS/token), por lo que si solo viene la URL del .mpd hay que descargarlo.
+async function ensureDashManifestString(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  if (!isDashMime(payload?.manifestMimeType)) return payload;
+  if (typeof payload?.manifest === 'string' && payload.manifest.trim().length > 0) return payload;
+
+  const mpdUrl = payload?.url || payload?.directUrl || null;
+  if (!mpdUrl || !/^https?:\/\//i.test(mpdUrl)) return payload;
+
+  try {
+    const resp = await axios.get(mpdUrl, {
+      timeout: 10000,
+      validateStatus: () => true,
+      responseType: 'text'
+    });
+    if (resp.status >= 200 && resp.status < 300
+      && typeof resp.data === 'string'
+      && resp.data.trim().length > 0) {
+      return { ...payload, manifest: resp.data };
+    }
+  } catch (e) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.warn('[dash] no se pudo descargar el manifest:', e?.message);
+    }
+  }
+
+  return payload;
+}
+
 async function resolveTrackForDownload(id, qRaw) {
   const VALID_QUALITIES = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"];
   const requestedQuality = VALID_QUALITIES.includes(qRaw) ? qRaw : "LOSSLESS";
@@ -2595,11 +2829,12 @@ async function resolveTrackForDownload(id, qRaw) {
     return { error: "No se pudo obtener el track en ninguna calidad" };
   }
 
-  const respData = { ...success.data };
-  const decoded = tryDecodeManifest(respData.manifest);
+  const respDataBase = { ...success.data };
+  const decoded = tryDecodeManifest(respDataBase.manifest);
   if (decoded !== null) {
-    respData.manifest = decoded;
+    respDataBase.manifest = decoded;
   }
+  const respData = await ensureDashManifestString(respDataBase);
 
   let streamUrl = respData.url || null;
   if (!streamUrl && respData.manifest && typeof respData.manifest === 'object' && Array.isArray(respData.manifest.urls)) {
@@ -2643,9 +2878,27 @@ async function _fetchFirstSearchResult({ apis, searchQuery, limit, offset, timeo
 }
 
 async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
+  const normalizeHifiPayload = (payload) => {
+    if (!payload || typeof payload !== 'object') return payload;
+    let result = payload;
+    if (result.data && typeof result.data === 'object') {
+      const inner = result.data;
+      result = (inner && typeof inner.attributes === 'object' && inner.attributes)
+        ? { ...inner.attributes, ...inner }
+        : { ...inner };
+    }
+    if (typeof result.uri === 'string' && !result.url) result.url = result.uri;
+    if (result.trackPresentation && !result.assetPresentation) result.assetPresentation = result.trackPresentation;
+    if (!result.manifestMimeType && typeof result.url === 'string') {
+      if (/\.mpd($|\?)/i.test(result.url)) result.manifestMimeType = 'application/dash+xml';
+      else if (/\.m3u8($|\?)/i.test(result.url)) result.manifestMimeType = 'application/vnd.apple.mpegurl';
+    }
+    return result;
+  };
+
   const extractTrackPayload = (data) => {
     if (!data || typeof data !== 'object') return null;
-    if (data.data && typeof data.data === 'object') return data.data;
+    if (data.data && typeof data.data === 'object') return normalizeHifiPayload(data.data);
 
     if (
       data.manifest != null
@@ -2654,7 +2907,7 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
       || data.trackId != null
       || data.id != null
     ) {
-      return data;
+      return normalizeHifiPayload(data);
     }
 
     return null;
@@ -2664,7 +2917,7 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
     if (!payload || typeof payload !== 'object') return false;
     if (payload.streamReady === false) return false;
 
-    const presentation = String(payload.assetPresentation || '').toUpperCase();
+    const presentation = String(payload.assetPresentation || payload.presentation || '').toUpperCase();
     if (presentation === 'PREVIEW') return false;
 
     if (typeof payload.url === 'string' && payload.url.trim()) return true;
@@ -2727,6 +2980,10 @@ function normalizeQobuzApiBase(value) {
   } catch {
     return '';
   }
+}
+
+function normalizeAmazonApiBase(value) {
+  return normalizeQobuzApiBase(value);
 }
 
 function mapTidalQualityToQobuzQuality(quality) {
@@ -2843,23 +3100,29 @@ async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIME
 
     const searchTimeoutMs = Math.min(Math.max(timeoutMs, 3000), QOBUZ_SEARCH_TIMEOUT_MS);
     const downloadTimeoutMs = Math.min(Math.max(timeoutMs, 4000), QOBUZ_DOWNLOAD_TIMEOUT_MS);
-    const controller = new AbortController();
-    let settled = false;
-    const requests = QOBUZ_API_BASES.map(async (qobuzApiBase) => {
+
+    // Se recorren las APIs de Qobuz en orden: la primera (API oficial itzsantiax) tiene prioridad.
+    for (const qobuzApiBase of QOBUZ_API_BASES) {
       try {
         const searchUrl = `${qobuzApiBase}/api/get-music?q=${encodeURIComponent(isrc)}&offset=0`;
-        const searchResponse = await axiosFast.get(searchUrl, { timeout: searchTimeoutMs, signal: controller.signal });
+        const searchResponse = await axiosFast.get(searchUrl, { timeout: searchTimeoutMs });
         const qobuzTrack = pickQobuzTrack(extractQobuzTrackItems(searchResponse.data), isrc);
         const qobuzTrackId = qobuzTrack?.id || qobuzTrack?.track_id || qobuzTrack?.trackId;
         if (!qobuzTrackId) throw new Error('Qobuz track not found');
 
         const qobuzQuality = mapTidalQualityToQobuzQuality(quality);
         const downloadUrl = `${qobuzApiBase}/api/download-music?track_id=${encodeURIComponent(qobuzTrackId)}&quality=${encodeURIComponent(qobuzQuality)}`;
-        const downloadResponse = await axiosFast.get(downloadUrl, { timeout: downloadTimeoutMs, signal: controller.signal });
+        const downloadResponse = await axiosFast.get(downloadUrl, { timeout: downloadTimeoutMs });
         const streamUrl = getQobuzDownloadUrl(downloadResponse.data);
         if (!streamUrl) throw new Error('Qobuz download URL not found');
 
-        const result = {
+        // Qobuz devuelve URLs de muestra (solo unos segundos) con el parámetro `range`
+        // (p.ej. range=20-30). Se descartan para evitar reproducir previews.
+        if (/[?&]range=/.test(streamUrl)) {
+          throw new Error('Qobuz sample URL (preview)');
+        }
+
+        return {
           ok: true,
           url: downloadUrl,
           data: {
@@ -2874,12 +3137,328 @@ async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIME
             qobuzApiBase
           }
         };
+      } catch (err) {
+        if (AUDIO_CACHE_DEBUG) {
+          console.warn('[qobuz-fallback] provider failed:', qobuzApiBase, err?.message || err);
+        }
+      }
+    }
+
+    return null;
+  } catch (err) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.warn('[qobuz-fallback] failed:', err?.message || err);
+    }
+    return null;
+  }
+}
+
+// ==================== AMAZON MUSIC FALLBACK HELPERS ====================
+
+function mapTidalQualityToAmazonQuality(quality) {
+  const normalized = (quality || '').toString().toUpperCase().trim();
+  if (normalized === 'HI_RES_LOSSLESS') return 'UHD_96';
+  if (normalized === 'LOSSLESS') return 'HD_44';
+  if (normalized === 'HIGH') return 'SD_HIGH';
+  return 'SD_HIGH';
+}
+
+function getConfigAmazonQuality(requestedQuality) {
+  const configured = (AMAZON_QUALITY || '').toString().toUpperCase().trim();
+  if (configured && /^(SD_LOW|SD_HIGH|HD_UHD|HD_44|UHD_96|UHD_192|HD|SD)$/.test(configured)) {
+    return configured;
+  }
+  return mapTidalQualityToAmazonQuality(requestedQuality);
+}
+
+function extractAmazonData(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.data && typeof payload.data === 'object') return payload.data;
+  if (payload.result && typeof payload.result === 'object') return payload.result;
+  if (payload.track && typeof payload.track === 'object') return payload.track;
+  return payload;
+}
+
+function extractAmazonTracks(payload) {
+  const data = extractAmazonData(payload);
+  if (!data || typeof data !== 'object') return [];
+  const candidates = [
+    data.tracks,
+    data.items,
+    data.results,
+    data.data,
+    Array.isArray(data) ? data : null
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+    if (candidate && Array.isArray(candidate.items)) return candidate.items;
+    if (candidate && Array.isArray(candidate.tracks)) return candidate.tracks;
+    if (candidate && Array.isArray(candidate.results)) return candidate.results;
+  }
+  return [];
+}
+
+function pickAmazonTrack(items, nameHint) {
+  const normalizedTitle = (nameHint?.title || '').toString().trim().toLowerCase();
+  const normalizedArtist = (nameHint?.artist || '').toString().trim().toLowerCase();
+  const normalizedIsrc = (nameHint?.isrc || '').toString().trim().toUpperCase();
+  if (!Array.isArray(items)) return null;
+
+  const score = (item) => {
+    let points = 0;
+    if (normalizedIsrc && String(item?.isrc || '').toUpperCase() === normalizedIsrc) points += 100;
+    const title = String(item?.name || item?.title || '').toLowerCase();
+    if (normalizedTitle && title === normalizedTitle) points += 10;
+    else if (normalizedTitle && title.includes(normalizedTitle)) points += 5;
+    const artistNames = Array.isArray(item?.artists)
+      ? item.artists.map((a) => String(a?.name || a || '').toLowerCase())
+      : [String(item?.artist || '').toLowerCase()];
+    if (normalizedArtist && artistNames.some((name) => name && name.includes(normalizedArtist))) points += 5;
+    return points;
+  };
+
+  const ranked = items.map((item, index) => ({ item, index, points: score(item) }))
+    .sort((a, b) => (b.points - a.points) || (a.index - b.index));
+  return ranked[0]?.points > 0 ? ranked[0].item : items[0] || null;
+}
+
+function getAmazonAsin(track) {
+  if (!track) return null;
+  return track?.asin || track?.id || track?.trackId || track?.asins?.[0] || null;
+}
+
+function extractAmazonStreamUrl(payload, quality) {
+  const data = extractAmazonData(payload);
+  if (!data || typeof data !== 'object') return null;
+
+  const qualityLabel = (quality || '').toUpperCase();
+  const candidates = [];
+
+  // keys endpoints suelen devolver streams por calidad
+  const qualitiesList = Array.isArray(data.streams) ? data.streams : (Array.isArray(data.results) ? data.results : []);
+  if (qualitiesList.length === 0 && Array.isArray(data.data)) {
+    qualitiesList.push(...data.data);
+  }
+
+  for (const q of qualitiesList) {
+    if (typeof q === 'string') {
+      candidates.push(q);
+      continue;
+    }
+    if (qualityLabel && String(q?.quality || q?.name || '').toUpperCase() === qualityLabel) {
+      candidates.push(q?.url || q?.stream_url || q?.play_url || q?.manifest || q?.link);
+    }
+    candidates.push(q?.url || q?.stream_url || q?.play_url || q?.manifest || q?.link);
+  }
+
+  candidates.push(
+    data.url,
+    data.stream_url,
+    data.play_url,
+    data.manifest,
+    data.playUrl,
+    data.streamUrl,
+    data.href
+  );
+
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim() && /^https?:\/\//i.test(value.trim())) {
+      return value.trim();
+    }
+    if (value && typeof value === 'object') {
+      const nested = extractAmazonData(value);
+      const nestedUrl = extractAmazonStreamUrl({ data: nested }, quality);
+      if (nestedUrl) return nestedUrl;
+    }
+  }
+  return null;
+}
+
+function extractAmazonManifest(payload) {
+  const data = extractAmazonData(payload);
+  if (!data || typeof data !== 'object') return null;
+  const value = data.manifest || data.xml || null;
+  if (typeof value === 'string' && value.trim()) return value;
+  return null;
+}
+
+function extractAmazonKeys(payload) {
+  const data = extractAmazonData(payload);
+  if (!data || typeof data !== 'object') return null;
+  const encKeys = data.encryption_keys || data.encryptionKey || data.keys || data.key
+    || data.content_key || data.contentKey || data.decryption_key || data.decryptionKey;
+  if (Array.isArray(encKeys) && encKeys.length > 0) {
+    return encKeys.map((k) => (typeof k === 'string' ? k : (k?.key || k?.content_key || k?.contentKey || null))).filter(Boolean);
+  }
+  if (typeof encKeys === 'string' && encKeys.trim()) return [encKeys];
+  return null;
+}
+
+function getAmazonKeyHex(payload) {
+  const data = extractAmazonData(payload);
+  if (!data || typeof data !== 'object') return null;
+  const candidates = [
+    data.key,
+    data.content_key,
+    data.contentKey,
+    data.decryption_key,
+    data.decryptionKey,
+    data.encryption_key,
+    data.encryptionKey
+  ];
+  if (data.encryption_keys && typeof data.encryption_keys === 'object') {
+    candidates.push(data.encryption_keys.key, data.encryption_keys.content_key, data.encryption_keys.contentKey);
+  }
+  if (Array.isArray(data.keys)) {
+    const first = data.keys[0];
+    if (typeof first === 'string') candidates.push(first);
+    else if (first && typeof first === 'object') candidates.push(first.key, first.content_key, first.contentKey);
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return null;
+}
+
+function buildAmazonFallbackUrl(req, rawUrl) {
+  if (!rawUrl || !/^https?:\/\//i.test(String(rawUrl).trim())) return rawUrl;
+  // Proxificar streams de Amazon (no son accesibles directamente desde el navegador por CORS/DRM)
+  if (isAllowedAudioProxyUrl(rawUrl)) {
+    return buildAudioProxyUrl(req, rawUrl) || rawUrl;
+  }
+  return rawUrl;
+}
+
+async function fetchAmazonFallbackTrackData({ id, quality, timeoutMs = TRACK_TIMEOUT_MS, req = null }) {
+  if (!AMAZON_FALLBACK_ENABLED || AMAZON_API_BASES.length === 0) {
+    if (AUDIO_CACHE_DEBUG) {
+      console.warn('[amazon-fallback] disabled or no API bases configured');
+    }
+    return null;
+  }
+
+  try {
+    const tidalTrack = await fetchOfficialTidalTrackInfo(id, timeoutMs);
+    const nameHint = {
+      title: tidalTrack?.title || '',
+      artist: tidalTrack?.artist?.name || tidalTrack?.artists?.[0]?.name || '',
+      album: tidalTrack?.album?.title || '',
+      isrc: (tidalTrack?.isrc || '').toString().trim() || ''
+    };
+
+    const amazonQuality = getConfigAmazonQuality(quality);
+    const searchTimeoutMs = Math.min(Math.max(timeoutMs, 3000), AMAZON_SEARCH_TIMEOUT_MS);
+    const streamTimeoutMs = Math.min(Math.max(timeoutMs, 4000), AMAZON_STREAM_TIMEOUT_MS);
+    const controller = new AbortController();
+    let settled = false;
+
+    const requests = AMAZON_API_BASES.map(async (amazonApiBase) => {
+      try {
+        // 1) Resolver el track a un ASIN
+        const resolveParams = new URLSearchParams();
+        resolveParams.set('title', nameHint.title);
+        if (nameHint.artist) resolveParams.set('artist', nameHint.artist);
+        if (nameHint.album) resolveParams.set('album', nameHint.album);
+        if (nameHint.isrc) resolveParams.set('isrc', nameHint.isrc);
+        const resolveUrl = `${amazonApiBase}/v1/resolve?${resolveParams.toString()}`;
+        const resolveResponse = await axiosFast.get(resolveUrl, { timeout: searchTimeoutMs, signal: controller.signal });
+        const resolveData = extractAmazonData(resolveResponse.data);
+        const asin = getAmazonAsin(
+          resolveData?.track || resolveData?.candidates?.[0] || resolveData?.[0]
+          || (Array.isArray(resolveData) ? resolveData[0] : resolveData)
+        );
+
+        // Si la resolución falló, intentar una búsqueda
+        let amazonTrack = resolveData?.track || (Array.isArray(resolveData?.candidates) ? resolveData.candidates[0] : null);
+        if (!asin) {
+          const searchParams = new URLSearchParams();
+          searchParams.set('q', `${nameHint.title} ${nameHint.artist}`.trim());
+          searchParams.set('enrich', 'false');
+          const searchUrl = `${amazonApiBase}/v1/search?${searchParams.toString()}`;
+          const searchResponse = await axiosFast.get(searchUrl, { timeout: searchTimeoutMs, signal: controller.signal });
+          const searchItems = extractAmazonTracks(searchResponse.data);
+          const picked = pickAmazonTrack(searchItems, nameHint);
+          amazonTrack = picked;
+          const resolvedAsin = getAmazonAsin(picked);
+          if (!resolvedAsin) throw new Error('Amazon track ASIN not found');
+        }
+        const finalAsin = getAmazonAsin(amazonTrack) || asin;
+        if (!finalAsin) throw new Error('Amazon ASIN not found');
+
+        // 2) Listar streams
+        const streamsUrl = `${amazonApiBase}/v1/streams/${encodeURIComponent(finalAsin)}?quality=${encodeURIComponent(amazonQuality)}`;
+        const streamsResponse = await axiosFast.get(streamsUrl, { timeout: streamTimeoutMs, signal: controller.signal });
+
+        // 3) Obtener claves de descifrado
+        const keysUrl = `${amazonApiBase}/v1/keys/${encodeURIComponent(finalAsin)}?quality=${encodeURIComponent(amazonQuality)}`;
+        const keysResponse = await axiosFast.get(keysUrl, { timeout: streamTimeoutMs, signal: controller.signal });
+
+        const streamUrl = extractAmazonStreamUrl(streamsResponse.data, amazonQuality);
+        const streamUrlFromKeys = extractAmazonStreamUrl(keysResponse.data, amazonQuality);
+        const finalStreamUrl = streamUrl || streamUrlFromKeys;
+        const manifest = extractAmazonManifest(streamsResponse.data) || extractAmazonManifest(keysResponse.data);
+        const keys = extractAmazonKeys(keysResponse.data);
+        const keyHex = getAmazonKeyHex(keysResponse.data) || (Array.isArray(keys) ? keys[0] : null);
+
+        if (!finalStreamUrl && !manifest) throw new Error('Amazon stream URL not found');
+        if (!keyHex) throw new Error('Amazon decryption key not found');
+
+        // Proxificar el stream de Amazon (CORS/DRM) y apuntar el player al
+        // Service Worker descifrador (/api/decrypt-stream), que lo descifra
+        // en el navegador con AES-CTR y lo sirve como FLAC.
+        const proxiedStreamUrl = req ? buildAmazonFallbackUrl(req, finalStreamUrl) : finalStreamUrl;
+        const decryptParams = new URLSearchParams();
+        decryptParams.set('url', proxiedStreamUrl);
+        decryptParams.set('key', keyHex);
+        decryptParams.set('codec', 'flac');
+        const decryptUrl = `/api/decrypt-stream?${decryptParams.toString()}`;
+
+        const payload = {
+          id: Number(tidalTrack?.id || id) || id,
+          trackId: Number(tidalTrack?.id || id) || id,
+          title: tidalTrack?.title || nameHint.title || '',
+          version: tidalTrack?.version || null,
+          artist: nameHint.artist,
+          artists: Array.isArray(tidalTrack?.artists)
+            ? tidalTrack.artists.map((a) => ({ id: a.id, name: a.name })).filter((a) => a.name)
+            : (nameHint.artist ? [{ name: nameHint.artist }] : []),
+          album: {
+            id: tidalTrack?.album?.id || null,
+            title: nameHint.album || tidalTrack?.album?.title || '',
+            cover: normalizeOfficialTidalImageCover(tidalTrack?.album?.cover || tidalTrack?.cover)
+          },
+          cover: normalizeOfficialTidalImageCover(tidalTrack?.album?.cover || tidalTrack?.cover),
+          coverUrl: buildCoverUrlFromTrack(
+            { cover: normalizeOfficialTidalImageCover(tidalTrack?.album?.cover || tidalTrack?.cover) },
+            1280
+          ),
+          duration: tidalTrack?.duration ?? null,
+          explicit: Boolean(tidalTrack?.explicit),
+          isrc: tidalTrack?.isrc || null,
+          audioQuality: quality,
+          quality,
+          requestedQuality: quality,
+          usedQuality: quality,
+          assetPresentation: 'FULL',
+          manifestMimeType: 'audio/flac',
+          source: 'amazon-fallback',
+          amazonAsin: finalAsin,
+          amazonQuality,
+          url: decryptUrl,
+          directUrl: proxiedStreamUrl || finalStreamUrl || null,
+          amazonStreamUrl: finalStreamUrl || null,
+          amazonKey: keyHex,
+          amazonKeys: keys,
+          amazonManifest: manifest,
+          amazonApiBase
+        };
+
         settled = true;
         controller.abort();
-        return result;
+        return { ok: true, url: keysUrl, data: payload };
       } catch (err) {
         if (AUDIO_CACHE_DEBUG && !settled && err?.code !== 'ERR_CANCELED') {
-          console.warn('[qobuz-fallback] provider failed:', qobuzApiBase, err?.message || err);
+          console.warn('[amazon-fallback] provider failed:', amazonApiBase, err?.message || err);
         }
         throw err;
       }
@@ -2888,7 +3467,7 @@ async function fetchQobuzFallbackTrackData({ id, quality, timeoutMs = TRACK_TIME
     return await Promise.any(requests);
   } catch (err) {
     if (AUDIO_CACHE_DEBUG) {
-      console.warn('[qobuz-fallback] failed:', err?.message || err);
+      console.warn('[amazon-fallback] failed:', err?.message || err);
     }
     return null;
   }
@@ -3479,6 +4058,7 @@ app.get('/api/track/:id', async (req, res) => {
     const fallback = await fetchTrackFallbackData({
       id,
       requestedQuality,
+      req,
       log: (message) => console.log(message)
     });
     const { success, matchedQuality, attemptedQualities: qualitiesToTry } = fallback;
@@ -3509,16 +4089,17 @@ app.get('/api/track/:id', async (req, res) => {
 
     // Devolver la data real
       // Decodificar manifest si viene en base64
-      const respData = { ...success.data };
-
-      const decoded = tryDecodeManifest(respData.manifest);
+      const respDataBase = { ...success.data };
+      const decoded = tryDecodeManifest(respDataBase.manifest);
       if (decoded !== null) {
         // Reemplazar manifest por el objeto/string decodificado (sin duplicar)
-        respData.manifest = decoded;
-        console.log('✔️ Manifest decodificado para track', respData.trackId || id);
+        respDataBase.manifest = decoded;
+        console.log('✔️ Manifest decodificado para track', respDataBase.trackId || id);
       } else {
-        console.log('ℹ️ No se pudo decodificar manifest para track', respData.trackId || id);
+        console.log('ℹ️ No se pudo decodificar manifest para track', respDataBase.trackId || id);
       }
+      // Si es DASH y solo hay URL del .mpd, descargar el manifest inline
+      const respData = await ensureDashManifestString(respDataBase);
 
       // Para FLAC/JSON: extraer URL simple del manifest
       let streamUrl = respData.url || null;
@@ -3616,6 +4197,75 @@ app.get('/api/track/:id', async (req, res) => {
   }
 });
 
+app.get('/api/video/proxy', async (req, res) => {
+  try {
+    const targetUrl = (req.query.url || '').toString().trim();
+    if (!targetUrl || !isAllowedVideoProxyUrl(targetUrl)) {
+      return res.status(400).json({ error: 'URL de video no permitida' });
+    }
+
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+
+    const upstream = await axios({
+      method: 'GET',
+      url: targetUrl,
+      responseType: 'stream',
+      timeout: 0,
+      validateStatus: () => true,
+      headers: {
+        ...(req.headers.range ? { Range: req.headers.range } : {}),
+        'User-Agent': req.get('user-agent') || 'Yupify/1.0'
+      }
+    });
+
+    const contentType = String(upstream.headers['content-type'] || '').toLowerCase();
+    res.status(upstream.status);
+    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    res.setHeader('Cache-Control', 'no-store');
+
+    if (upstream.status >= 400) {
+      upstream.data.pipe(res);
+      return;
+    }
+
+    if (contentType.includes('mpegurl') || targetUrl.toLowerCase().includes('.m3u8')) {
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.removeHeader('Content-Length');
+      let manifestText = '';
+      upstream.data.setEncoding('utf8');
+      upstream.data.on('data', chunk => { manifestText += chunk; });
+      upstream.data.on('end', () => {
+        const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
+        res.end(rewritten);
+      });
+      upstream.data.on('error', () => {
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'Error al leer manifest de video' });
+        } else {
+          res.end();
+        }
+      });
+      return;
+    }
+
+    upstream.data.on('error', () => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Error al proxificar video' });
+      } else {
+        res.end();
+      }
+    });
+    upstream.data.pipe(res);
+  } catch (error) {
+    console.error('Error en /api/video/proxy:', error.message);
+    return res.status(500).json({ error: 'Error interno al proxificar video' });
+  }
+});
+
 app.get('/api/video/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -3669,73 +4319,6 @@ app.get('/api/video/:id', async (req, res) => {
   } catch (error) {
     console.error('Error en /api/video:', error.message);
     return res.status(500).json({ error: 'Error interno al obtener video' });
-  }
-});
-
-app.get('/api/video/proxy', async (req, res) => {
-  try {
-    const targetUrl = (req.query.url || '').toString().trim();
-    if (!targetUrl || !isAllowedVideoProxyUrl(targetUrl)) {
-      return res.status(400).json({ error: 'URL de video no permitida' });
-    }
-
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
-
-    const upstream = await axios({
-      method: 'GET',
-      url: targetUrl,
-      responseType: 'stream',
-      timeout: 0,
-      validateStatus: () => true,
-      headers: {
-        ...(req.headers.range ? { Range: req.headers.range } : {}),
-        'User-Agent': req.get('user-agent') || 'Yupify/1.0'
-      }
-    });
-
-    const contentType = String(upstream.headers['content-type'] || '').toLowerCase();
-    res.status(upstream.status);
-    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
-    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
-    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
-    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
-    res.setHeader('Cache-Control', 'no-store');
-
-    if (upstream.status >= 400) {
-      upstream.data.pipe(res);
-      return;
-    }
-
-    if (contentType.includes('mpegurl') || targetUrl.toLowerCase().includes('.m3u8')) {
-      let manifestText = '';
-      upstream.data.setEncoding('utf8');
-      upstream.data.on('data', chunk => { manifestText += chunk; });
-      upstream.data.on('end', () => {
-        const rewritten = rewriteM3u8Manifest(manifestText, targetUrl, req);
-        res.end(rewritten);
-      });
-      upstream.data.on('error', () => {
-        if (!res.headersSent) {
-          res.status(502).json({ error: 'Error al leer manifest de video' });
-        } else {
-          res.end();
-        }
-      });
-      return;
-    }
-
-    upstream.data.on('error', () => {
-      if (!res.headersSent) {
-        res.status(502).json({ error: 'Error al proxificar video' });
-      } else {
-        res.end();
-      }
-    });
-    upstream.data.pipe(res);
-  } catch (error) {
-    console.error('Error en /api/video/proxy:', error.message);
-    return res.status(500).json({ error: 'Error interno al proxificar video' });
   }
 });
 
@@ -4275,7 +4858,8 @@ app.get('/api/playlist/:id', async (req, res) => {
 app.get('/api/lyrics', async (req, res) => {
   try {
     // Aceptar 'track' como alias para 'title'
-    const { id, title, track, artist, album, duration, source, sourcePrefer, sourceOnly, version } = req.query;
+    const { id, title, track, artist, album, duration, source, sourcePrefer, sourceOnly, version, isrc } = req.query;
+    const routeIsrc = (isrc || '').toString().trim().toUpperCase();
     const finalTitle = title || track;
     const versionText = (version || '').toString().trim();
     const titleVariants = [];
@@ -4293,13 +4877,15 @@ app.get('/api/lyrics', async (req, res) => {
     addTitleVariant(baseTitle);
 
     const trackId = (id || '').toString().trim();
-    if ((!finalTitle || !artist) && !trackId) {
+    if ((!finalTitle || !artist) && !trackId && !routeIsrc) {
       return res.status(400).json({
-        error: "Faltan parámetros obligatorios: id o title (o track) y artist"
+        error: "Faltan parámetros obligatorios: id o title (o track) y artist (o isrc)"
       });
     }
 
-    const DEFAULT_SOURCES = ['apple', 'musixmatch', 'lyricsplus', 'spotify', 'musixmatch-word'];
+    const DEFAULT_SOURCES = routeIsrc
+      ? ['binimum-isrc', 'prjktla', 'apple', 'musixmatch', 'lyricsplus', 'spotify', 'musixmatch-word']
+      : ['prjktla', 'apple', 'musixmatch', 'lyricsplus', 'spotify', 'musixmatch-word'];
     const parseSources = (value) => (
       (value || '')
         .toString()
@@ -4321,7 +4907,7 @@ app.get('/api/lyrics', async (req, res) => {
     const baseSource = sourcesList.join(',');
     const explicitSingleSource = Boolean(sourceOnly) || (source && parseSources(source).length === 1);
     const providerParam = (req.query.provider || '').toString().toLowerCase().trim();
-    const DEFAULT_PROVIDERS = ['santiax','binimum', 'atomix', 'vercel', 'prjktla'];
+    const DEFAULT_PROVIDERS = ['prjktla', 'santiax'];
     const parseProviders = (value) => (
       (value || '')
         .toString()
@@ -4335,8 +4921,6 @@ app.get('/api/lyrics', async (req, res) => {
       providerList = [...DEFAULT_PROVIDERS];
     }
     if (explicitSingleSource) {
-      // Si el cliente fuerza una sola fuente, evitar fallback al provider rate-limited
-      providerList = providerList.filter(p => p !== 'prjktla');
       if (providerList.length === 0) providerList = ['binimum'];
     }
     providerList = Array.from(new Set(providerList)).filter(p => DEFAULT_PROVIDERS.includes(p));
@@ -4362,18 +4946,6 @@ app.get('/api/lyrics', async (req, res) => {
       return res.json(cached);
     }
 
-    let gdriveCaches = await loadLyricsCachesFromGDrive(gdriveCacheKey, sourcesList);
-    if (gdriveCaches.length === 0 && versionText) {
-      // Fallback a cache sin versión para no romper caches existentes
-      gdriveCaches = await loadLyricsCachesFromGDrive(baseGdriveCacheKey, sourcesList);
-    }
-    if (gdriveCaches.length > 0) {
-      const combined = buildCombinedLyricsPayload(gdriveCaches, sourcesList);
-      if (combined) {
-        setCache(cacheKey, combined, CACHE_TTL.lyrics);
-        return res.json(combined);
-      }
-    }
     if (ONLY_GOOGLE_DRIVE) {
       return res.status(404).json({
         error: 'ONLY_GOOGLE_DRIVE enabled: lyrics cache miss',
@@ -4432,10 +5004,7 @@ app.get('/api/lyrics', async (req, res) => {
 
     const providerUrls = {
       santiax: 'https://lyricsplus.itzsantiax.qzz.io/v2/lyrics/get',
-      binimum: 'https://lyrics.geeked.wtf/v2/lyrics/get',
-      prjktla: 'https://lyricsplus.prjktla.workers.dev/v2/lyrics/get',
-      atomix:  'https://lyricsplus.atomix.one/v2/lyrics/get',
-      vercel:  'https://lyricsplus-seven.vercel.app/v2/lyrics/get'
+      prjktla: 'https://lyricsplus.prjktla.my.id/v2/lyrics/get',
     };
     const lyricsSources = providerList
       .map(p => providerUrls[p])
@@ -4467,12 +5036,14 @@ app.get('/api/lyrics', async (req, res) => {
       return payload;
     };
 
-    const hasLyrics = (payload) => (
-      hasLyricsPayload(payload)
-      || hasLyricsPayload(payload?.data)
-      || hasLyricsPayload(payload?.result)
-      || hasLyricsPayload(payload?.data?.result)
-    );
+    const hasLyrics = (payload) => {
+      if (payload == null) return false;
+      if (hasMangledGzipField(payload)) return false;
+      return hasLyricsPayload(payload)
+        || hasLyricsPayload(payload?.data)
+        || hasLyricsPayload(payload?.result)
+        || hasLyricsPayload(payload?.data?.result);
+    };
 
     const attachLyricsSource = (payload, sourceName) => {
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -4488,6 +5059,27 @@ app.get('/api/lyrics', async (req, res) => {
       return next;
     };
 
+    const saveLyricsInBackground = (payload, sourceName) => {
+      if (LYRICS_CACHE_DEBUG) {
+        console.log('[lyrics-cache] SAVE queued:', gdriveCacheKey, 'source:', sourceName);
+      }
+      saveLyricsCacheToGDrive(gdriveCacheKey, payload, sourceName).catch((error) => {
+        console.warn('GDrive cache failed:', error.message);
+      });
+    };
+
+    const updateSongListInBackground = (sourceName, title = finalTitle, artistName = artist) => {
+      updateSongListEntry({
+        title,
+        artist: artistName,
+        album: album || '',
+        duration: duration || '',
+        source: sourceName
+      }).catch((error) => {
+        console.warn('songList update failed:', error.message);
+      });
+    };
+
     const collectedPayloads = [];
     const collectedSources = new Set();
     let lastError = null;
@@ -4495,38 +5087,63 @@ app.get('/api/lyrics', async (req, res) => {
     for (const requestedSource of sourcesList) {
       let sourcePayload = null;
 
-      for (const baseUrl of lyricsSources) {
-        for (const paramsObj of paramsToTry) {
-          const requestParams = {
-            ...paramsObj,
-            source: requestedSource
-          };
-          const url = `${baseUrl}?${new URLSearchParams(requestParams)}`;
-          console.log("-> Lyrics API:", url);
+      if (requestedSource === 'binimum-isrc') {
+        // Fuente por ISRC: https://lyrics-api.binimum.org/?isrc=...
+        if (routeIsrc) {
           try {
-            const response = await axios.get(url, { timeout: 15000 });
-            const payload = attachLyricsSource(parseLyricsPayload(response.data), requestedSource);
-
-            if (hasLyrics(payload)) {
-              sourcePayload = payload;
-              break;
-            } else if (LYRICS_CACHE_DEBUG) {
-              const keys = payload && typeof payload === 'object' ? Object.keys(payload) : [];
-              console.log('[lyrics-cache] No lyrics in response. Keys:', keys, 'source:', requestedSource);
+            console.log("-> Lyrics API binimum-isrc:", routeIsrc);
+            const isrcPayload = await fetchBinimumIsrcLyrics(routeIsrc);
+            if (isrcPayload && hasLyrics(isrcPayload)) {
+              sourcePayload = attachLyricsSource(isrcPayload, requestedSource);
+            } else {
+              lastError = new Error(`Binimum ISRC sin letras: ${routeIsrc}`);
             }
-
-            lastError = new Error(`Lyrics empty for source ${requestedSource}`);
           } catch (err) {
             lastError = err;
-            const status = err?.response?.status;
-            if (status === 429) {
-              sawRateLimit = true;
-              break; // no insistir con este proveedor
-            }
           }
         }
+      } else {
+        for (const baseUrl of lyricsSources) {
+          for (const paramsObj of paramsToTry) {
+            const requestParams = routeIsrc
+              ? {
+                  title: paramsObj.title,
+                  artist: paramsObj.artist,
+                  isrc: routeIsrc,
+                  album: paramsObj.album,
+                  duration: paramsObj.duration
+                }
+              : { ...paramsObj };
+            if (baseUrl !== 'https://lyricsplus.prjktla.my.id/v2/lyrics/get') {
+              requestParams.source = requestedSource;
+            }
+            const url = `${baseUrl}?${new URLSearchParams(requestParams)}`;
+            console.log("-> Lyrics API:", url);
+            try {
+              const response = await axios.get(url, { timeout: 15000, responseType: 'arraybuffer' });
+              const payload = attachLyricsSource(parseLyricsPayload(decodeLyricsBody(response.data)), requestedSource);
 
-        if (sourcePayload) break;
+              if (hasLyrics(payload)) {
+                sourcePayload = payload;
+                break;
+              } else if (LYRICS_CACHE_DEBUG) {
+                const keys = payload && typeof payload === 'object' ? Object.keys(payload) : [];
+                console.log('[lyrics-cache] No lyrics in response. Keys:', keys, 'source:', requestedSource);
+              }
+
+              lastError = new Error(`Lyrics empty for source ${requestedSource}`);
+            } catch (err) {
+              lastError = err;
+              const status = err?.response?.status;
+              if (status === 429) {
+                sawRateLimit = true;
+                break; // no insistir con este proveedor
+              }
+            }
+          }
+
+          if (sourcePayload) break;
+        }
       }
 
       if (sourcePayload) {
@@ -4536,49 +5153,11 @@ app.get('/api/lyrics', async (req, res) => {
         });
         collectedSources.add(requestedSource);
 
-        if (LYRICS_CACHE_DEBUG) {
-          console.log('[lyrics-cache] SAVE attempt:', gdriveCacheKey, 'source:', requestedSource);
-        }
-        try {
-          await saveLyricsCacheToGDrive(gdriveCacheKey, sourcePayload, requestedSource);
-        } catch (e) {
-          console.warn('GDrive cache failed:', e.message);
-        }
-
-        if (explicitSingleSource) {
-          setCache(cacheKey, sourcePayload, CACHE_TTL.lyrics);
-          try {
-            await updateSongListEntry({
-              title: finalTitle,
-              artist,
-              album: album || '',
-              duration: duration || '',
-              source: requestedSource
-            });
-          } catch (e) {
-            console.warn('songList update failed:', e.message);
-          }
-          return res.json(sourcePayload);
-        }
-      }
-    }
-
-    if (collectedPayloads.length > 0) {
-      const combined = buildCombinedLyricsPayload(collectedPayloads, sourcesList);
-      if (combined) {
-        setCache(cacheKey, combined, CACHE_TTL.lyrics);
-        try {
-          await updateSongListEntry({
-            title: finalTitle,
-            artist,
-            album: album || '',
-            duration: duration || '',
-            source: Array.from(collectedSources).join(',') || baseSource
-          });
-        } catch (e) {
-          console.warn('songList update failed:', e.message);
-        }
-        return res.json(combined);
+        setCache(cacheKey, sourcePayload, CACHE_TTL.lyrics);
+        res.json(sourcePayload);
+        saveLyricsInBackground(sourcePayload, requestedSource);
+        updateSongListInBackground(requestedSource);
+        return;
       }
     }
 
@@ -4591,8 +5170,8 @@ app.get('/api/lyrics', async (req, res) => {
       const idFallbackRequests = lyricsApis.map(async (apiBase) => {
         const url = `${apiBase}/lyrics/?id=${encodeURIComponent(trackId)}`;
         if (LYRICS_CACHE_DEBUG) console.log('-> Lyrics ID API:', url);
-        const response = await axiosFast.get(url, { timeout: SEARCH_TIMEOUT_MS, signal: controller.signal });
-        const payload = parseLyricsPayload(response.data);
+        const response = await axiosFast.get(url, { timeout: SEARCH_TIMEOUT_MS, signal: controller.signal, responseType: 'arraybuffer' });
+        const payload = parseLyricsPayload(decodeLyricsBody(response.data));
         if (!hasLyrics(payload)) throw new Error('Lyrics ID fallback empty');
 
         const payloadSource = extractSourceFromPayload(payload);
@@ -4609,23 +5188,25 @@ app.get('/api/lyrics', async (req, res) => {
 
       if (idFallbackPayload) {
         setCache(cacheKey, idFallbackPayload, CACHE_TTL.lyrics);
-        try {
-          await saveLyricsCacheToGDrive(gdriveCacheKey, idFallbackPayload, extractSourceFromPayload(idFallbackPayload) || 'lyricsplus');
-        } catch (e) {
-          console.warn('GDrive cache failed:', e.message);
-        }
-        try {
-          await updateSongListEntry({
-            title: finalTitle || `track:${trackId}`,
-            artist: artist || '',
-            album: album || '',
-            duration: duration || '',
-            source: extractSourceFromPayload(idFallbackPayload) || 'track-id'
-          });
-        } catch (e) {
-          console.warn('songList update failed:', e.message);
-        }
-        return res.json(idFallbackPayload);
+        const sourceName = extractSourceFromPayload(idFallbackPayload) || 'track-id';
+        res.json(idFallbackPayload);
+        saveLyricsInBackground(idFallbackPayload, sourceName);
+        updateSongListInBackground(sourceName, finalTitle || `track:${trackId}`, artist || '');
+        return;
+      }
+    }
+
+    // Las APIs son la fuente principal; Google Drive se consulta solo como último fallback.
+    let gdriveCaches = await loadLyricsCachesFromGDrive(gdriveCacheKey, sourcesList);
+    if (gdriveCaches.length === 0 && versionText) {
+      // Fallback a cache sin versión para no romper caches existentes
+      gdriveCaches = await loadLyricsCachesFromGDrive(baseGdriveCacheKey, sourcesList);
+    }
+    if (gdriveCaches.length > 0) {
+      const combined = buildCombinedLyricsPayload(gdriveCaches, sourcesList);
+      if (combined) {
+        setCache(cacheKey, combined, CACHE_TTL.lyrics);
+        return res.json(combined);
       }
     }
 
@@ -4717,7 +5298,56 @@ app.get('/api/mix/:id', async (req, res) => {
   }
 });
 
-// Obtener top videos
+// Extraer los items de video reales de la respuesta de Tidal HiFi.
+// La API devuelve un wrapper de página: { videos: [ { type: "VIDEO_LIST", pagedList: { items: [...] } } ] }.
+function extractTopVideoItems(payload) {
+  const candidates = [];
+  const seen = new Set();
+
+  const pushItem = (item) => {
+    if (!item || typeof item !== 'object') return;
+    if (!seen.has(item)) seen.add(item);
+    else return;
+    candidates.push(item);
+  };
+
+  const walkVideosList = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue;
+      if (entry.pagedList && Array.isArray(entry.pagedList.items)) {
+        for (const item of entry.pagedList.items) pushItem(item);
+      } else {
+        pushItem(entry);
+      }
+      if (Array.isArray(entry.items)) {
+        for (const item of entry.items) pushItem(item);
+      }
+    }
+  };
+
+  if (Array.isArray(payload?.videos)) walkVideosList(payload.videos);
+  if (Array.isArray(payload?.items)) {
+    for (const item of payload.items) pushItem(item);
+  }
+  if (Array.isArray(payload?.data?.videos)) walkVideosList(payload.data.videos);
+  if (Array.isArray(payload?.data?.items)) {
+    for (const item of payload.data.items) pushItem(item);
+  }
+
+  return candidates.filter((item) => {
+    if (item?.id == null && item?.videoId == null) return false;
+    const type = String(item?.type || item?.itemType || '').toLowerCase();
+    if (type.includes('video') && !type.includes('video_list')) return true;
+    if (type === 'music video' || type === 'musicvideo') return true;
+    if (String(item?.videoType || '').toLowerCase().includes('video')) return true;
+    if (type === 'video_item' || type === 'video_list') return false;
+    if (item?.imageId && !item?.cover) return true;
+    return type === 'track' ? false : Boolean(item?.title);
+  });
+}
+
+// Obtener top videos (music videos de Tidal) con fallback entre APIs disponibles
 app.get('/api/topvideos', async (req, res) => {
   try {
     const {
@@ -4727,20 +5357,62 @@ app.get('/api/topvideos', async (req, res) => {
       limit = 12,
       offset = 0
     } = req.query;
-    const api = await getRandomAPI();
+
+    const maxLimit = 50;
+    const parsedLimit = Math.max(0, Math.min(parseInt(limit, 10) || 12, maxLimit));
+    const parsedOffset = Math.max(0, parseInt(offset, 10) || 0);
+
+    // El mirror de Tidal HiFi ignora el limit y devuelve `videos` vacío si offset > 0.
+    // Siempre pedimos offset=0 y paginamos localmente sobre los items obtenidos.
     const params = new URLSearchParams({
       countryCode: String(countryCode),
       locale: String(locale),
       deviceType: String(deviceType),
-      limit: String(limit),
-      offset: String(offset)
+      limit: '100',
+      offset: '0'
     });
 
-    const response = await axios.get(`${api}/topvideos/?${params.toString()}`, {
-      timeout: 10000
-    });
+    const apis = await getAvailableHifiApis({ waitForHealth: true });
+    let lastError = null;
 
-    res.json(response.data);
+    for (const api of apis) {
+      try {
+        const response = await axios.get(`${api}/topvideos/?${params.toString()}`, {
+          timeout: 10000,
+          validateStatus: () => true
+        });
+        if (response.status < 200 || response.status >= 300) {
+          lastError = new Error(`${api} respondió ${response.status}`);
+          console.warn(`[topvideos] ${api} respondió ${response.status}, probando siguiente`);
+          continue;
+        }
+
+        const items = extractTopVideoItems(response.data);
+        if (items.length === 0) {
+          lastError = new Error(`${api} no devolvió videos`);
+          console.warn(`[topvideos] ${api} no devolvió videos, probando siguiente`);
+          continue;
+        }
+
+        const total = response.data?.videos?.[0]?.pagedList?.totalNumberOfItems
+          ?? items.length;
+        const pageItems = items.slice(parsedOffset, parsedOffset + parsedLimit);
+
+        return res.json({
+          items: pageItems,
+          total,
+          limit: parsedLimit,
+          offset: parsedOffset,
+          hasMore: parsedOffset + pageItems.length < total,
+          videos: Array.isArray(response.data?.videos) ? response.data.videos : undefined
+        });
+      } catch (error) {
+        lastError = error;
+        console.warn(`[topvideos] error con ${api}:`, error.message);
+      }
+    }
+
+    throw lastError || new Error('No hay APIs HiFi disponibles');
   } catch (error) {
     console.error('Error al obtener top videos:', error.message);
     res.status(500).json({ error: 'Error al obtener top videos' });
@@ -5342,6 +6014,11 @@ app.get('/health', async (req, res) => {
       qobuzFallbackEnabled: QOBUZ_FALLBACK_ENABLED,
       qobuzApiCount: QOBUZ_API_BASES.length,
       qobuzApis: QOBUZ_API_BASES,
+      amazonFallbackEnabled: AMAZON_FALLBACK_ENABLED,
+      amazonApiCount: AMAZON_API_BASES.length,
+      amazonApis: AMAZON_API_BASES,
+      amazonQuality: AMAZON_QUALITY,
+      amazonWvdConfigured: Boolean(AMAZON_WVD_PATH),
       users: usersCount
     });
   } catch (error) {
@@ -5381,6 +6058,11 @@ app.get('/health', async (req, res) => {
       qobuzFallbackEnabled: QOBUZ_FALLBACK_ENABLED,
       qobuzApiCount: QOBUZ_API_BASES.length,
       qobuzApis: QOBUZ_API_BASES,
+      amazonFallbackEnabled: AMAZON_FALLBACK_ENABLED,
+      amazonApiCount: AMAZON_API_BASES.length,
+      amazonApis: AMAZON_API_BASES,
+      amazonQuality: AMAZON_QUALITY,
+      amazonWvdConfigured: Boolean(AMAZON_WVD_PATH),
       users: db.users.size
     });
   }

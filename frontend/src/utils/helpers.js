@@ -104,6 +104,19 @@ export const getCoverUrl = (track, size = 1280) => {
     return `https://resources.tidal.com/images/${coverIdFromTrack}/${size}x${size}.jpg`;
   }
 
+  // Music videos: Tidal usa imageId (uuid) en lugar de cover
+  if (Array.isArray(track.imageId) && track.imageId.length > 0) {
+    const ids = track.imageId.filter((id) => typeof id === 'string' && /^[0-9a-fA-F-]{32,36}$/.test(id));
+    if (ids.length > 0) {
+      return `https://resources.tidal.com/images/${ids[0].replace(/-/g, '/')}/${size}x${size}.jpg`;
+    }
+  } else if (typeof track.imageId === 'string') {
+    const imageId = track.imageId.trim();
+    if (/^[0-9a-fA-F-]{32,36}$/.test(imageId)) {
+      return `https://resources.tidal.com/images/${imageId.replace(/-/g, '/')}/${size}x${size}.jpg`;
+    }
+  }
+
   // Si existe ID de portada de Tidal
   if (track.album?.cover) {
     const coverId = normalizeCoverId(track.album.cover);

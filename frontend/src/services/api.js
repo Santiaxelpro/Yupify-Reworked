@@ -294,6 +294,7 @@ export const trackService = {
     if (options.id != null && options.id !== '') {
       params.set('id', String(options.id));
     }
+    if (options.isrc) params.set('isrc', String(options.isrc));
     if (options.album) params.set('album', options.album);
     if (options.duration != null && options.duration !== '') {
       const durationValue = Number(options.duration);

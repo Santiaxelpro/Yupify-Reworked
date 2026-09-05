@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Plyr from 'plyr';
 import { X, Loader, Clapperboard, MonitorPlay, Sparkles } from 'lucide-react';
-import api from '../services/api';
+import api, { buildApiUrl } from '../services/api';
 import { getArtistName, getCoverUrl, getTrackDisplayTitle } from '../utils/helpers';
 import 'plyr/dist/plyr.css';
 
@@ -69,10 +69,20 @@ const VideoModal = ({ isOpen, video, onClose }) => {
     if (!isOpen || !videoData || !videoRef.current) return undefined;
 
     const element = videoRef.current;
-    const playbackUrl = videoData?.url || null;
+    const rawUrl = videoData?.url || null;
     const mime = videoData?.manifestMimeType || '';
-    const isDash = isDashMime(mime) || /\.mpd($|\?)/i.test(playbackUrl || '');
-    const isHls = isHlsMime(mime) || /\.m3u8($|\?)/i.test(playbackUrl || '');
+    const mimeLower = mime.toLowerCase();
+    const isDash = isDashMime(mime) || /\.mpd($|\?)/i.test(rawUrl || '');
+    const isHls = isHlsMime(mime) || /\.m3u8($|\?)/i.test(rawUrl || '') || mimeLower.includes('tidal.emu');
+
+    // El manifest HLS de Tidal no puede reproducirse desde el navegador de forma directa
+    // (falla por CORS/token): se proxifica a través del backend, que reescribe el manifest
+    // y los segmentos para que pasen también por el proxy.
+    let playbackUrl = rawUrl;
+    const alreadyProxied = /\/api\/video\/proxy\?/.test(rawUrl || '');
+    if (isHls && rawUrl && !alreadyProxied && /^https?:\/\//i.test(rawUrl)) {
+      playbackUrl = buildApiUrl(`/api/video/proxy?url=${encodeURIComponent(rawUrl)}`);
+    }
 
     let disposed = false;
 
@@ -183,7 +193,7 @@ const VideoModal = ({ isOpen, video, onClose }) => {
 
   if (!isOpen || !video) return null;
 
-  const cover = videoData?.coverUrl || getCoverUrl(video, 1280) || getCoverUrl(video, 640) || '';
+  const cover = videoData?.coverUrl || getCoverUrl(video, 640) || getCoverUrl(video, 320) || '';
   const title = getTrackDisplayTitle(video) || video.title || video.name || 'Video';
   const artist = getArtistName(video);
 

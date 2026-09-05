@@ -178,6 +178,9 @@ export const useAudio = () => {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
+  const playSeqRef = useRef(0);
+  const shakaOpLockRef = useRef(Promise.resolve());
+
   const [volume, setVolume] = useState(0.7);
   const [isMuted, setIsMuted] = useState(false);
   const volumeRef = useRef(volume);
@@ -322,11 +325,29 @@ export const useAudio = () => {
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
 
+    const handlePlaybackError = (() => {
+      let lastHandledKey = '';
+      return (event) => {
+        const src = typeof event?.srcElement?.currentSrc === 'string' ? event.srcElement.currentSrc : '';
+        if (src && src === lastHandledKey) return;
+        lastHandledKey = src;
+        console.error('❌ Audio playback error:', event);
+        if (onEndedRef.current) {
+          try {
+            onEndedRef.current();
+          } catch (e) {
+            console.error('Error en error de reproducción:', e);
+          }
+        }
+      };
+    })();
+
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('loadedmetadata', handleLoadedMeta);
     audio.addEventListener('ended', handleEnded);
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
+    audio.addEventListener('error', handlePlaybackError);
 
     return () => {
       audio.removeEventListener('timeupdate', handleTimeUpdate);
@@ -334,6 +355,7 @@ export const useAudio = () => {
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('play', handlePlay);
       audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('error', handlePlaybackError);
     };
   }, []);
 
@@ -363,6 +385,9 @@ export const useAudio = () => {
   };
 
   const playTrack = async (track, options = {}) => {
+    const onError = typeof options.onError === 'function' ? options.onError : null;
+    const seq = ++playSeqRef.current;
+    const isStale = () => seq !== playSeqRef.current;
     try {
       cancelFade();
       console.log("📀 Loading track:", track.id, track.title);
@@ -377,6 +402,7 @@ export const useAudio = () => {
       
       if (!audioElement) {
         console.error("❌ No se pudo obtener audio element");
+        if (onError) onError(new Error('No audio element'));
         return;
       }
 
@@ -445,6 +471,7 @@ export const useAudio = () => {
         for (const q of fallbackQualities) {
           try {
             const fallbackData = await api.track.getTrack(track.id, q, track);
+            if (isStale()) return false;
             const presentation = String(fallbackData?.assetPresentation || '').toUpperCase();
             if (presentation === 'PREVIEW') continue;
             if (fallbackData?.manifestMimeType === 'application/dash+xml') continue;
@@ -495,6 +522,7 @@ export const useAudio = () => {
         const ok = await tryFallback();
         if (!ok) {
           console.error('❌ No se pudo obtener stream FULL');
+          if (onError) onError(new Error('Track only available as preview'));
         }
         return;
       }
@@ -509,12 +537,8 @@ export const useAudio = () => {
         
         try {
           const player = await initShakaPlayer(audioElement);
-          if (player && typeof player.unload === 'function') {
-            try {
-              await player.unload();
-            } catch (e) {
-              console.warn('Shaka unload warning:', e);
-            }
+          if (!player || typeof player.load !== 'function') {
+            throw new Error('Shaka Player no disponible');
           }
           if (typeof trackData.manifest !== 'string') {
             throw new Error('Manifest DASH inv?lido');
@@ -522,14 +546,32 @@ export const useAudio = () => {
 
           const inlineKey = `inline://manifest/${Date.now()}-${Math.random().toString(36).slice(2)}`;
           inlineManifestStore.set(inlineKey, trackData.manifest);
-          try {
-            // Cargar manifest DASH con Shaka Player (inline)
+
+          // Serializar load/unload sobre el player compartido para evitar
+          // LOAD_INTERRUPTED (7000) cuando varias playTrack corren en paralelo,
+          // y descartar operaciones obsoletas si ya se pidió otra reproducción.
+          const dashLoad = shakaOpLockRef.current.then(async () => {
+            if (isStale()) return false;
+            if (typeof player.unload === 'function') {
+              try {
+                await player.unload();
+              } catch (e) {
+                console.warn('Shaka unload warning:', e);
+              }
+            }
+            if (isStale()) return false;
             await player.load(inlineKey, null, 'application/dash+xml');
+            return !isStale();
+          });
+          shakaOpLockRef.current = dashLoad.catch(() => undefined);
+
+          try {
+            const loaded = await dashLoad;
+            if (!loaded) return;
           } finally {
             inlineManifestStore.delete(inlineKey);
           }
 
-          
           setCurrentTrack({ ...mergedTrack, isDash: true, manifest: trackData.manifest });
           // Intentar obtener la duración desde Shaka Player
           try {
@@ -561,9 +603,13 @@ export const useAudio = () => {
           }
           }
         } catch (error) {
+          if (isStale()) return;
           console.error("❌ Error en DASH playback:", error);
           // Fallback a LOSSLESS
-          await tryFallback();
+          const ok = await tryFallback();
+          if (!ok) {
+            if (onError) onError(error);
+          }
         }
       } else {
         // 🎵 Standard playback (JSON manifest)
@@ -573,7 +619,10 @@ export const useAudio = () => {
           console.error("❌ No se encontró URL en track data");
           console.error("Track data structure:", trackData);
           const ok = await tryFallback();
-          if (!ok) return;
+          if (!ok) {
+            if (onError) onError(new Error('No stream URL found'));
+            return;
+          }
         }
 
         if (audioElement?.canPlayType) {
@@ -583,7 +632,10 @@ export const useAudio = () => {
             if (!canPlay) {
               console.warn("⚠️ MIME no soportado:", mimes.join(', '), "→ intentando fallback");
               const ok = await tryFallback();
-              if (!ok) return;
+              if (!ok) {
+                if (onError) onError(new Error('MIME not supported'));
+                return;
+              }
             }
           }
         }
@@ -618,7 +670,9 @@ export const useAudio = () => {
       }
 
     } catch (error) {
+      if (isStale()) return;
       console.error("❌ Error cargando track:", error);
+      if (onError) onError(error);
     }
   };
 

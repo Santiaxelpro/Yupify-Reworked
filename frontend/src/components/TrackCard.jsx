@@ -5,7 +5,7 @@ import { getArtistName, getCoverUrl, getTrackDisplayTitle, getTrackQualityValue,
 
 const TrackCard = ({ track, onPlay, onToggleFavorite, onDownload, onSelectArtist, isFavorite }) => {
   const itemType = String(track?.type || 'track').toLowerCase();
-  const cover = getCoverUrl(track, 1280);
+  const cover = getCoverUrl(track, 320);
   const qualityLabel = formatQualityLabel(getTrackQualityValue(track, ''), '');
   const releaseYear = typeof track?.releaseDate === 'string' ? track.releaseDate.slice(0, 4) : '';
   const metaLabel = qualityLabel || (

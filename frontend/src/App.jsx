@@ -27,7 +27,7 @@ const LAST_PLAYBACK_KEY = 'yupify_last_playback';
 const MAX_HISTORY_ITEMS = 100;
 const SKIP_RATIO_THRESHOLD = 0.35;
 const SKIP_SECONDS_THRESHOLD = 30;
-const NEXT_PRELOAD_LIMIT = 2;
+  const NEXT_PRELOAD_LIMIT = 1;
 const MAX_PRELOAD_CACHE_ITEMS = 6;
 
 const App = () => {
@@ -628,7 +628,13 @@ const App = () => {
 
     const preloadKey = getPreloadKey(track);
     const preloadedTrackData = preloadKey ? preloadCacheRef.current.get(preloadKey) : null;
-    playTrack(track, { preloadedTrackData });
+    playTrack(track, {
+      preloadedTrackData,
+      onError: () => {
+        if (autoNextInFlightRef.current) return;
+        handleAutoNext();
+      }
+    });
     if (preloadKey) {
       const preloadedAudio = preloadAudioRef.current.get(preloadKey);
       if (preloadedAudio) {
@@ -901,7 +907,7 @@ const App = () => {
           if (isDash || !trackData?.url || typeof Audio === 'undefined') return;
 
           const audio = new Audio();
-          audio.preload = 'auto';
+          audio.preload = 'metadata';
           audio.src = trackData.url;
           audio.load();
           preloadAudioRef.current.set(key, audio);
