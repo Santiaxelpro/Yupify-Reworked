@@ -946,6 +946,7 @@ const HIFI_APIS = {
     'https://hund.qqdl.site'
   ],
   community: [
+    'https://hifi.rhythmax.workers.dev',
     'https://hifi-2tzpyfhd.geeked.wtf',
     'https://hifi-two.spotisaver.net',
     'https://hifi-spo.spotisaver.net',
@@ -2937,7 +2938,10 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
 
   const requests = apis.map(api => {
     const cleanApi = api.replace(/\/+$/, "");
-    const url = `${cleanApi}/trackManifests/?id=${encodeURIComponent(id)}&quality=${encodeURIComponent(quality)}`;
+    const manifestPath = cleanApi.includes('hifi.rhythmax.workers.dev')
+      ? '/manifests'
+      : '/trackManifests/';
+    const url = `${cleanApi}${manifestPath}?id=${encodeURIComponent(id)}&quality=${encodeURIComponent(quality)}`;
     return axiosFast.get(url, { timeout: timeoutMs })
       .then(r => {
         const payload = extractTrackPayload(r.data);
