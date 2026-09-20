@@ -2209,7 +2209,9 @@ function parseDashAudioStreams(dashManifest) {
 }
 
 // Elige el stream de audio del MPD que corresponde a la calidad pedida.
-// Devuelve { id, codec } (para usar con -map 0:a:m:id:<id>) o null.
+// Devuelve { index, id, codec } o null. `index` es la posición del stream en el
+// orden en que el demuxer DASH de FFmpeg los expone (el mismo orden del MPD),
+// por lo que se puede usar directo con -map 0:a:<index>.
 function pickDashAudioStream(dashManifest, usedQuality) {
   const streams = parseDashAudioStreams(dashManifest);
   if (!streams.length) return null;
@@ -2243,7 +2245,7 @@ function pickDashAudioStream(dashManifest, usedQuality) {
   if (!chosen) return null;
 
   const codec = (chosen.codecs || '').toLowerCase().startsWith('flac') ? 'flac' : 'aac';
-  return { id: chosen.id, codec };
+  return { index: streams.indexOf(chosen), id: chosen.id, codec };
 }
 
 function isDashMime(mimeType) {
@@ -2704,9 +2706,9 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
         '-i', tempPath
       ];
 
-      const audioMap = dashStream?.id
-        ? `0:a:m:id:${dashStream.id}`
-        : '0:a:0';
+      const audioMap = dashStream?.index != null
+        ? `0:a:${dashStream.index}`
+        : (dashStream?.id ? `0:a:m:id:${dashStream.id}` : '0:a:0');
 
       if (AUDIO_CACHE_WITH_METADATA && coverPath) {
         args.push('-i', coverPath, '-map', audioMap, '-map', '1:v', '-disposition:v', 'attached_pic');
