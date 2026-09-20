@@ -1120,7 +1120,8 @@ async function getAvailableHifiApis(options = {}) {
   } else {
     await getActiveHifiApiStatuses();
   }
-  const apis = dedupeHifiApis(groups.flatMap(group => orderHifiApisByLatency(group.apis)));
+  const apis = dedupeHifiApis(groups.flatMap(group =>
+    group.source === 'priority' ? group.apis : orderHifiApisByLatency(group.apis)));
   hifiApiState.source = groups.some(group => group.source === 'uptime')
     ? 'local-first+uptime-fallback'
     : 'local-first';
@@ -1190,7 +1191,10 @@ async function getLatencyRankedHifiApiFallbackGroups(options = {}) {
     await getActiveHifiApiStatuses();
   }
   return groups
-    .map(group => ({ ...group, apis: orderHifiApisByLatency(group.apis) }))
+    .map(group => ({
+      ...group,
+      apis: group.source === 'priority' ? group.apis : orderHifiApisByLatency(group.apis)
+    }))
     .filter(group => group.apis.length > 0);
 }
 
@@ -1203,7 +1207,7 @@ async function checkHifiApiStatus(api, source, orderIndex = 0) {
     });
     const responseTimeMs = Date.now() - startedAt;
     const version = String(response?.data?.version || '').trim();
-    const ok = response.status >= 200 && response.status < 300 && /^2\./.test(version);
+    const ok = response.status >= 200 && response.status < 300 && /^[12]\.\d/.test(version);
     return {
       api,
       url: api,
