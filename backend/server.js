@@ -893,14 +893,32 @@ app.use(cors({
 app.use(express.json());
 
 // Rate limiting
+const isMediaStreamingPath = (req) => {
+  const path = (req.path || req.originalUrl || '').toString();
+  return (
+    path.includes('/audio/proxy')
+    || path.includes('/audio/file/')
+    || path.includes('/video/proxy')
+    || path.includes('/dash/')
+  );
+};
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 100 // límite de 100 requests por ventana
+  max: 100, // límite de 100 requests por ventana por IP real del cliente
+  skip: isMediaStreamingPath,
+  keyGenerator: (req) => {
+    const cfIp = (req.headers['cf-connecting-ip'] || '').toString().trim();
+    if (cfIp) return cfIp;
+    return req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
+  }
 });
 app.use('/api/', limiter);
 
 // APIs de HiFi disponibles (algunas antiguos estan muertas)
 const HIFI_APIS = {
+  priority: [
+    'https://hifi.rhythmax.workers.dev'
+  ],
   official: [
     'https://hifi-one.itzsantiax.qzz.io',
     'https://hifi-two.itzsantiax.qzz.io',
@@ -946,7 +964,6 @@ const HIFI_APIS = {
     'https://hund.qqdl.site'
   ],
   community: [
-    'https://hifi.rhythmax.workers.dev',
     'https://hifi-2tzpyfhd.geeked.wtf',
     'https://hifi-two.spotisaver.net',
     'https://hifi-spo.spotisaver.net',
@@ -1086,8 +1103,12 @@ async function getHifiApiFallbackGroups(options = {}) {
       : [];
     getUptimeHifiApis().catch(() => []);
   }
+  const priorityApis = dedupeHifiApis(HIFI_APIS.priority || [])
+    .filter(api => localSet.has(api));
+  const restLocalApis = localApis.filter(api => !priorityApis.includes(api));
   const groups = [];
-  if (localApis.length > 0) groups.push({ source: 'local', apis: localApis });
+  if (priorityApis.length > 0) groups.push({ source: 'priority', apis: priorityApis });
+  if (restLocalApis.length > 0) groups.push({ source: 'local', apis: restLocalApis });
   if (uptimeApis.length > 0) groups.push({ source: 'uptime', apis: uptimeApis });
   return groups;
 }
@@ -2149,6 +2170,82 @@ function inferDashOutputExt(usedQuality, dashManifest = '') {
   return 'm4a';
 }
 
+function getDashOutputExtForCodec(codec) {
+  const c = (codec || '').toString().toLowerCase();
+  if (c.startsWith('flac')) return 'flac';
+  if (c.startsWith('mp4a') || c === 'aac') return 'm4a';
+  if (c.startsWith('opus')) return 'opus';
+  if (c.startsWith('vorbis')) return 'ogg';
+  return null;
+}
+
+// Parsea las Representation de un MPD DASH y devuelve { id, codecs, bandwidth, sampleRate }.
+// Solo considera codecs de audio (flac, mp4a/aac, opus, vorbis).
+function parseDashAudioStreams(dashManifest) {
+  const m = (dashManifest || '').toString();
+  if (!m) return [];
+  const streams = [];
+  const repRe = /<Representation\b([^>]*)\/?>/gi;
+  let seg;
+  while ((seg = repRe.exec(m)) !== null) {
+    const attrs = seg[1];
+    const getAttr = (name) => {
+      const r = new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, 'i').exec(attrs);
+      return r ? r[1] : null;
+    };
+    const id = getAttr('id');
+    const codecs = getAttr('codecs');
+    if (!id || !codecs) continue;
+    const c = codecs.toLowerCase();
+    if (!(c.startsWith('flac') || c.startsWith('mp4a') || c === 'aac' || c.startsWith('opus') || c.startsWith('vorbis'))) continue;
+    streams.push({
+      id,
+      codecs,
+      bandwidth: Number(getAttr('bandwidth')) || 0,
+      sampleRate: Number(getAttr('audioSamplingRate')) || 0
+    });
+  }
+  return streams;
+}
+
+// Elige el stream de audio del MPD que corresponde a la calidad pedida.
+// Devuelve { id, codec } (para usar con -map 0:a:m:id:<id>) o null.
+function pickDashAudioStream(dashManifest, usedQuality) {
+  const streams = parseDashAudioStreams(dashManifest);
+  if (!streams.length) return null;
+
+  const quality = (usedQuality || '').toString().toUpperCase().trim();
+  const lossless = quality.includes('LOSSLESS') || quality.includes('HI_RES');
+
+  const pickBest = (list) => {
+    const sorted = [...list].sort((a, b) =>
+      (b.sampleRate || 0) - (a.sampleRate || 0) ||
+      (b.bandwidth || 0) - (a.bandwidth || 0)
+    );
+    return sorted[0] || null;
+  };
+
+  const flacs = streams.filter(s => (s.codecs || '').toLowerCase().startsWith('flac'));
+  const aacs = streams.filter(s => /mp4a|aac/i.test(s.codecs));
+
+  let chosen;
+  if (lossless) {
+    chosen = pickBest(flacs) || pickBest(aacs) || pickBest(streams);
+  } else {
+    const he = aacs.find(s => (s.codecs || '').toLowerCase().includes('mp4a.40.5'));
+    const lc = aacs.find(s => (s.codecs || '').toLowerCase().includes('mp4a.40.2'));
+    if (quality === 'LOW') {
+      chosen = he || pickBest(aacs) || pickBest(streams);
+    } else {
+      chosen = lc || pickBest(aacs) || pickBest(streams);
+    }
+  }
+  if (!chosen) return null;
+
+  const codec = (chosen.codecs || '').toLowerCase().startsWith('flac') ? 'flac' : 'aac';
+  return { id: chosen.id, codec };
+}
+
 function isDashMime(mimeType) {
   return typeof mimeType === 'string' && mimeType.toLowerCase().includes('dash');
 }
@@ -2554,8 +2651,9 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
   }
 
   const inputExt = streamUrl ? inferAudioExtension(streamUrl, usedQuality) : 'mpd';
+  const dashStream = dashEnabled ? pickDashAudioStream(dashManifest, usedQuality) : null;
   const outputExt = dashEnabled
-    ? inferDashOutputExt(usedQuality, dashManifest)
+    ? (dashStream?.codec ? (getDashOutputExtForCodec(dashStream.codec) || inferDashOutputExt(usedQuality, dashManifest)) : inferDashOutputExt(usedQuality, dashManifest))
     : ((AUDIO_CACHE_WITH_METADATA && ffmpegPath)
       ? (inputExt === 'flac' ? 'flac' : (inputExt === 'mp3' ? 'mp3' : 'm4a'))
       : inputExt);
@@ -2606,11 +2704,15 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
         '-i', tempPath
       ];
 
+      const audioMap = dashStream?.id
+        ? `0:a:m:id:${dashStream.id}`
+        : '0:a:0';
+
       if (AUDIO_CACHE_WITH_METADATA && coverPath) {
-        args.push('-i', coverPath, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
+        args.push('-i', coverPath, '-map', audioMap, '-map', '1:v', '-disposition:v', 'attached_pic');
         args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
       } else {
-        args.push('-map', '0:a');
+        args.push('-map', audioMap);
       }
       args.push('-c', 'copy');
 
@@ -2628,22 +2730,28 @@ async function cacheTrackAudio({ id, track, streamUrl, usedQuality, nameHint, da
       }
 
       args.push(outputPath);
-      try {
-        await runFfmpeg(args);
-      } catch (err) {
-        const message = String(err?.message || '');
-        if (message.toLowerCase().includes('option user_agent not found')) {
-          const fallbackArgs = args.filter((arg, idx) => {
-            const prev = args[idx - 1];
-            if (prev === '-user_agent') return false;
-            if (arg === '-user_agent') return false;
-            return true;
-          });
-          await runFfmpeg(fallbackArgs);
-        } else {
+      const runDashFfmpeg = async (ffmpegArgs) => {
+        try {
+          await runFfmpeg(ffmpegArgs);
+        } catch (err) {
+          const message = String(err?.message || '');
+          if (message.toLowerCase().includes('option user_agent not found')) {
+            const fallbackForUserAgent = ffmpegArgs.filter((arg, idx) => {
+              const prev = ffmpegArgs[idx - 1];
+              if (prev === '-user_agent') return false;
+              if (arg === '-user_agent') return false;
+              return true;
+            });
+            return runFfmpeg(fallbackForUserAgent);
+          }
+          if (message.toLowerCase().includes('matches no streams') && audioMap !== '0:a:0') {
+            const fallbackForMap = ffmpegArgs.map((arg) => (arg === audioMap ? '0:a:0' : arg));
+            return runFfmpeg(fallbackForMap);
+          }
           throw err;
         }
-      }
+      };
+      await runDashFfmpeg(args);
 
       const mimeType = inferAudioMimeType(outputExt);
       const fileId = await createGDriveFile(fileName, GDRIVE_AUDIO_FOLDER, mimeType);
@@ -2768,9 +2876,14 @@ function runFfmpeg(args) {
     proc.on('error', (err) => {
       reject(new Error(`FFmpeg no disponible: ${err.message}`));
     });
-    proc.on('close', (code) => {
+    proc.on('close', (code, signal) => {
       if (code === 0) return resolve();
-      return reject(new Error(stderr || `FFmpeg falló con código ${code}`));
+      const base = (stderr || '').trim();
+      if (base) {
+        const signalInfo = signal ? ` (signal ${signal})` : '';
+        return reject(new Error(`${base}${signalInfo}`));
+      }
+      return reject(new Error(`FFmpeg falló con código ${code}${signal ? ` (signal ${signal})` : ''}`));
     });
   });
 }
@@ -2895,6 +3008,8 @@ async function fetchFirstTrackData({ apis, id, quality, timeoutMs = 4500 }) {
       result = (inner && typeof inner.attributes === 'object' && inner.attributes)
         ? { ...inner.attributes, ...inner }
         : { ...inner };
+    } else if (typeof result.attributes === 'object' && result.attributes) {
+      result = { ...result.attributes, ...result };
     }
     if (typeof result.uri === 'string' && !result.url) result.url = result.uri;
     if (result.trackPresentation && !result.assetPresentation) result.assetPresentation = result.trackPresentation;
